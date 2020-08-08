@@ -52,8 +52,23 @@ if [ true = false ]; then
 	conda deactivate
 fi
 
-# GPytorch
+# GPyTorch - SGPR
 if [ true = true ]; then
+  ALGO="gpytorch-sgpr"
+  M=50
+  LR=0.001
+  EPOCHS=15
+  OUTFILE="logs/${DSET}_${ALGO}_${M}_learned_centers.txt"
+  conda activate torch
+	PYTHONPATH='..' python $PY_LAUNCHER -a $ALGO -d $DSET -M $M \
+				--lr $LR --learn-hyperparams -e $EPOCHS \
+				--seed 12 2>&1 | tee -a $OUTFILE
+  conda deactivate
+fi
+
+
+# GPytorch
+if [ true = false ]; then
 	ALGO="gpytorch-cls"
 	M=1000
 	VAR="diag"

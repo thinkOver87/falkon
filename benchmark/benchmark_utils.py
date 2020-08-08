@@ -46,6 +46,7 @@ class Algorithm(Enum):
     GPFLOW_REG = 'gpflow-reg'
     GPYTORCH_CLS = 'gpytorch-cls'
     GPFLOW_CLS = 'gpflow-cls'
+    GPYTORCH_SGPR = 'gpytorch-sgpr'
 
     def __str__(self):
         return self.value
