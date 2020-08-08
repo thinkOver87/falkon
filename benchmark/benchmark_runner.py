@@ -467,6 +467,63 @@ def run_logistic_falkon(dset: Dataset,
     test_model(flk, f"{algorithm} on {dset}", Xts, Yts, Xtr, Ytr, err_fns)
 
 
+def run_sgpr_gpflow(dset: Dataset,
+                    algorithm: Algorithm,
+                    dtype: Optional[DataType],
+                    lr: float,
+                    num_iter: int,
+                    num_centers: int,
+                    kernel_sigma: float,
+                    learn_ind_pts: bool,
+                    kernel_variance: float,
+                    seed: int,
+                    ):
+    import tensorflow as tf
+    import gpflow
+    from gpflow_model import TrainableSGPR
+    tf.random.set_seed(seed)
+    np.random.seed(seed)
+
+    # Data types
+    if dtype is None:
+        dtype = DataType.float32
+    if dtype == DataType.float32:
+        gpflow.config.set_default_float(np.float32)
+
+    err_fns = get_err_fns(dset)
+
+    # Kernel
+    sigma_initial = np.array(kernel_sigma, dtype=dtype.to_numpy_dtype())
+    kernel = gpflow.kernels.SquaredExponential(lengthscales=sigma_initial, variance=kernel_variance)
+
+    # Data loading
+    load_fn = get_load_fn(dset)
+    Xtr, Ytr, Xts, Yts, kwargs = load_fn(dtype=dtype.to_numpy_dtype(), as_torch=False,
+                                         as_tf=True)
+    err_fns = [functools.partial(fn, **kwargs) for fn in err_fns]
+
+    # Inducing points
+    inducing_idx = np.random.choice(Xtr.shape[0], num_centers, replace=False)
+    inducing_points = Xtr[inducing_idx].reshape(num_centers, -1)
+    print("Took %d random inducing points" % (inducing_points.shape[0]))
+    if Ytr.shape[1] != 1:
+        raise NotImplementedError("SGPR GPFLOW only implemented for 1 output")
+
+    # Define model, train and test
+    model = TrainableSGPR(kernel=kernel,
+                          inducing_points=inducing_points,
+                          num_iter=num_iter,
+                          err_fn=err_fns[0],
+                          train_hyperparams=learn_ind_pts,
+                          lr=lr)
+    t_s = time.time()
+    print("Starting to train model %s on data %s" % (model, dset), flush=True)
+    model.fit(Xtr, Ytr, Xts, Yts)
+    print("Training of %s on %s complete in %.2fs" %
+          (algorithm, dset, time.time() - t_s), flush=True)
+    test_model(model, f"{algorithm} on {dset}", Xts, Yts, Xtr, Ytr, err_fns)
+
+
 def run_gpflow(dset: Dataset,
                algorithm: Algorithm,
                dtype: Optional[DataType],
@@ -691,5 +748,10 @@ if __name__ == "__main__":
         run_gpytorch_sgpr(dset=args.dataset, algorithm=args.algorithm, dtype=args.dtype,
                           lr=args.lr, num_iter=args.epochs, num_centers=args.num_centers,
                           learn_ind_pts=args.learn_hyperparams, seed=args.seed)
+    elif args.algorithm == Algorithm.GPFLOW_SGPR:
+        run_sgpr_gpflow(dset=args.dataset, algorithm=args.algorithm, dtype=args.dtype,
+                        lr=args.lr, num_iter=args.epochs, num_centers=args.num_centers,
+                        kernel_sigma=args.sigma, learn_ind_pts=args.learn_hyperparams,
+                        kernel_variance=args.kernel_variance, seed=args.seed)
     else:
         raise NotImplementedError(f"No benchmark implemented for algorithm {args.algorithm}.")

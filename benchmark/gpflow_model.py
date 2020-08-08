@@ -26,6 +26,66 @@ def data_generator(X, Y, batch_size):
         bstart = bend
 
 
+class TrainableSGPR():
+    def __init__(self,
+                 kernel,
+                 inducing_points,
+                 num_iter,
+                 err_fn,
+                 train_hyperparams: bool = True,
+                 lr: float = 0.001,):
+        self.train_hyperparams = train_hyperparams
+        self.lr = lr
+        self.kernel = kernel
+        self.Z = inducing_points.copy()
+        self.num_iter = num_iter
+        self.err_fn = err_fn
+        self.model = None
+
+    def fit(self, X, Y, Xval, Yval):
+        self.model = gpflow.models.SGPR(
+            (X, Y),
+            kernel=self.kernel,
+            inducing_variable=self.Z)
+
+        # Setup training parameters
+        if not self.train_hyperparams:
+            set_trainable(self.model.inducing_variable.Z, False)
+
+        # Create the optimizers
+        adam_opt = tf.optimizers.Adam(self.lr)
+
+        gpflow.utilities.print_summary(self.model)
+        print("", flush=True)
+
+        t_elapsed = 0
+        for step in range(self.num_iter):
+            t_s = time.time()
+            adam_opt.minimize(self.model.training_loss, var_list=self.model.trainable_variables)
+            t_elapsed += time.time() - t_s
+            val_err, err_name = self.err_fn(Yval, self.predict(Xval))
+            print(f"Epoch {step + 1} - {t_elapsed:7.2f}s elapsed - "
+                  f"validation {err_name} {val_err:7.5f}", flush=True)
+
+        print("Final model is ")
+        gpflow.utilities.print_summary(self.model)
+        print("", flush=True)
+        return self
+
+    def predict(self, X):
+        return self.model.predict_y(X)
+
+    @property
+    def inducing_points(self):
+        return self.model.inducing_variable.Z.numpy()
+
+    def __str__(self):
+        return (("TrainableSGPR<kernel=%s, num_inducing_points=%d, "
+                 "num_iter=%d, lr=%f, train_hyperparams=%s, model=%s>")
+                % (self.kernel, self.Z.shape[0], self.num_iter, self.lr,
+                   self.train_hyperparams, self.model))
+
+
 class TrainableSVGP():
     def __init__(self,
                  kernel,
