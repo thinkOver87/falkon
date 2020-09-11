@@ -116,7 +116,8 @@ class Falkon(FalkonBase):
             X: torch.Tensor,
             Y: torch.Tensor,
             Xts: Optional[torch.Tensor] = None,
-            Yts: Optional[torch.Tensor] = None):
+            Yts: Optional[torch.Tensor] = None,
+            alpha: Optional[torch.Tensor] = None):
         """Fits the Falkon KRR model.
 
         Parameters
@@ -216,11 +217,11 @@ class Falkon(FalkonBase):
             optim = falkon.optim.FalkonConjugateGradient(self.kernel, precond, o_opt)
             if Knm is not None:
                 beta = optim.solve(
-                    Knm, None, Y, self.penalty, initial_solution=None,
+                    Knm, None, Y, self.penalty, initial_solution=alpha,
                     max_iter=self.maxiter, callback=validation_cback)
             else:
                 beta = optim.solve(
-                    X, ny_points, Y, self.penalty, initial_solution=None,
+                    X, ny_points, Y, self.penalty, initial_solution=alpha,
                     max_iter=self.maxiter, callback=validation_cback)
 
             self.alpha_ = precond.apply(beta)

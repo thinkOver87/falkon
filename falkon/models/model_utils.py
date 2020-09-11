@@ -233,7 +233,7 @@ def to_c_contig(tensor: Optional[torch.Tensor],
         "unnecessary copy, either disable KeOps (passing `keops_active='no'`) or make "
         "the input tensors C-contiguous."
     )
-    if tensor is not None and is_f_contig(tensor):
+    if tensor is not None and is_f_contig(tensor, strict=True):
         if warn:
             warnings.warn(warning_text % name)
         orig_device = tensor.device

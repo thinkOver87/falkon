@@ -1,6 +1,6 @@
 import warnings
 from abc import ABC, abstractmethod
-from typing import Union, Tuple
+from typing import Union, Tuple, TypeVar
 
 import numpy as np
 import torch
@@ -9,7 +9,7 @@ from falkon.sparse.sparse_tensor import SparseTensor
 from falkon.utils.tensor_helpers import create_same_stride
 
 __all__ = ("CenterSelector", "FixedSelector", "UniformSelector")
-_tensor_type = Union[torch.Tensor, SparseTensor]
+_tensor_type = TypeVar('_tensor_type', torch.Tensor, SparseTensor)
 
 
 class CenterSelector(ABC):

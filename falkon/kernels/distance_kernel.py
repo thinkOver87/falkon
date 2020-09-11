@@ -163,13 +163,7 @@ class GaussianKernel(L2DistanceKernel, KeopsKernelMixin):
         super().__init__(self.kernel_name, opt)
 
         self.sigma, self.gaussian_type = self._get_sigma_kt(sigma)
-
-        if self.gaussian_type == 'single':
-            self.gamma = torch.tensor(
-                -0.5 / (self.sigma.item() ** 2), dtype=torch.float64).item()
-        else:
-            self.gamma = torch.cholesky(self.sigma, upper=False)
-            self.kernel_type = "l2-multi-distance"
+        self.gamma = self._sigma2gamma(self.sigma)
 
     @staticmethod
     def _get_sigma_kt(sigma):
@@ -198,6 +192,14 @@ class GaussianKernel(L2DistanceKernel, KeopsKernelMixin):
                 return torch.tensor(sigma, dtype=torch.float64), "single"
             except TypeError:
                 raise TypeError("Sigma must be a scalar or a tensor.")
+
+    def _sigma2gamma(self, sigma: torch.Tensor):
+        if self.gaussian_type == 'single':
+            gamma = (-0.5 / (sigma ** 2)).to(dtype=torch.float64).item()
+        else:
+            gamma = torch.cholesky(sigma, upper=False)
+            self.kernel_type = "l2-multi-distance"
+        return gamma
 
     def _keops_mmv_impl(self, X1, X2, v, kernel, out, opt: FalkonOptions):
         if self.gaussian_type == 'single':
