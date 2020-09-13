@@ -17,6 +17,9 @@ from falkon.optim import ConjugateGradient
 from falkon.center_selection import UniformSelector, FixedSelector
 from falkon.kernels.diff_rbf_kernel import DiffGaussianKernel
 from falkon.kernels.tiling_red import TilingGenred
+from falkon.hypergrad.hypergrad import compute_hypergrad
+from falkon.hypergrad.falkon_ho import FalkonHO
+from falkon.hypergrad.krr_ho import KRR
 
 """ TEST HO FOR KRR """
 
@@ -37,251 +40,6 @@ def gen_data(n, d, seed=2, test_amount=50, dtype=torch.float32):
     Yts = Y[n - test_amount:]
 
     return Xtr, Ytr, Xts, Yts
-
-
-class AbstractHypergradModule(abc.ABC):
-    @abc.abstractmethod
-    def val_loss(self, params, hparams):
-        pass
-
-    @abc.abstractmethod
-    def param_derivative(self, params, hparams):
-        pass
-
-    @abc.abstractmethod
-    def hessian_vector_product(self, params, first_derivative, vector):
-        pass
-
-    @abc.abstractmethod
-    def mixed_vector_product(self, hparams, first_derivative, vector):
-        pass
-
-    @abc.abstractmethod
-    def val_loss_grads(self, params, hparams):
-        pass
-
-
-class KRR(AbstractHypergradModule):
-    def __init__(self, lr, Xtr, Ytr, Xts, Yts):
-        super().__init__()
-        self.Xtr = Xtr
-        self.Ytr = Ytr
-        self.Xts = Xts
-        self.Yts = Yts
-        self.lr = lr
-
-    def inner_fp_map(self, params, hparams):
-        alpha = params[0]
-        penalty, sigma = hparams
-        N = alpha.shape[0]
-        K = self.kernel(self.Xtr, self.Xtr, sigma)
-
-        # loss = torch.mean((K @ alpha - self.Ytr)**2) + penalty * alpha.T @ K @ alpha
-        # update = torch.autograd.grad(loss, params)[0]
-        Kalpha = K @ alpha
-        update = (2 / N) * K @ (Kalpha - self.Ytr) + 2 * penalty * Kalpha
-        return [alpha - self.lr * update]
-
-    def val_loss(self, params, hparams):
-        alpha = params[0]
-        penalty, sigma = hparams
-
-        Kts = self.kernel(self.Xts, self.Xtr, sigma)
-        preds = Kts @ alpha
-        return torch.mean((preds - self.Yts) ** 2)
-
-    def tr_loss(self, params, hparams):
-        alpha = params[0]
-        penalty, sigma = hparams
-
-        Ktr = self.kernel(self.Xtr, self.Xtr, sigma)
-        preds = Ktr @ alpha
-        return torch.mean((preds - self.Ytr) ** 2)
-
-    def kernel(self, X1, X2, sigma):
-        D = torch.norm(X1, p=2, dim=1, keepdim=True).pow_(2) + \
-            torch.norm(X2, p=2, dim=1, keepdim=True).pow_(2).T - \
-            2 * (X1 @ X2.T)
-        D = D / (-2 * sigma ** 2)
-        return torch.exp(D)
-
-    def param_derivative(self, params, hparams):
-        """Derivative of the training loss, with respect to the parameters"""
-        alpha = params[0]
-        penalty, sigma = hparams
-        N = alpha.shape[0]
-        K = self.kernel(self.Xtr, self.Xtr, sigma)
-
-        # loss = torch.mean((K @ alpha - self.Ytr)**2) + penalty * alpha.T @ K @ alpha
-        # update = torch.autograd.grad(loss, params)[0]
-        Kalpha = K @ alpha
-        update = (2 / N) * K @ (Kalpha - self.Ytr) + 2 * penalty * Kalpha
-        return update
-        # return [alpha - self.lr * update]
-
-    def hessian_vector_product(self, params, first_derivative, vector):
-        """
-        Calculates the Hessian of the training loss (with respect to the parameters), multiplied
-        by an arbitrary vector using the magic of autodiff.
-
-        Parameters
-        ----------
-        params
-        hparams
-        first_derivative
-            The derivative of the training loss, wrt params
-        vector
-            The vector to multiply the Hessian by
-        """
-        hvp = torch.autograd.grad(first_derivative, params, grad_outputs=vector, retain_graph=True)
-        return hvp
-
-    def mixed_vector_product(self, hparams, first_derivative, vector):
-        """
-        Calculates the mixed-derivative of the training loss, with respect to the parameters
-        first (that derivative should be in the `first_derivative` parameter), and then
-        with respect to the hyper-parameters; all multiplied by an arbitrary vector.
-
-        Parameters
-        ----------
-        params
-        hparams
-        first_derivative
-            The derivative of the training loss, wrt params
-        vector
-            The vector to multiply the derivative by
-        """
-        return torch.autograd.grad(first_derivative, hparams, grad_outputs=vector,
-                                   allow_unused=True)
-
-    def val_loss_grads(self, params, hparams):
-        o_loss = self.val_loss(params, hparams)
-        return (
-            torch.autograd.grad(o_loss, params, allow_unused=True, create_graph=True,
-                                retain_graph=True),
-            torch.autograd.grad(o_loss, hparams, allow_unused=True, create_graph=True,
-                                retain_graph=True)
-        )
-
-
-class FalkonHO(AbstractHypergradModule):
-    def __init__(self, M, Xtr, Ytr, Xts, Yts):
-        super().__init__()
-        self.Xtr = Xtr
-        self.Ytr = Ytr
-        self.Xts = Xts
-        self.Yts = Yts
-
-        self.M = M
-        self.opt = FalkonOptions(use_cpu=True)
-
-        centers = UniformSelector(np.random.default_rng(10)).select(self.Xtr, None, M)
-        self.center_selection = FixedSelector(centers)
-        self.maxiter = 10
-
-    def inner_opt(self, params, hparams):
-        """This is NOT DIFFERENTIABLE"""
-        alpha = params[0]
-        penalty, sigma = hparams
-
-        kernel = DiffGaussianKernel(sigma.detach(), self.opt)
-        def sq_err(y_true, y_pred):
-            return torch.mean((y_true - y_pred)**2)
-        self.flk = falkon.Falkon(
-            kernel,
-            torch.exp(-penalty.detach()).item(),
-            self.M,
-            center_selection=self.center_selection,
-            maxiter=self.maxiter,
-            seed=129,
-            options=self.opt)
-        self.flk.fit(self.Xtr, self.Ytr, alpha=alpha.detach())
-        return [self.flk.alpha_]
-
-    def val_loss(self, params, hparams):
-        alpha = params[0]
-        penalty, sigma = hparams
-        kernel = DiffGaussianKernel(sigma, self.opt)
-        ny_points = self.flk.ny_points_
-        preds = kernel.mmv(self.Xts, ny_points, alpha)
-        return torch.mean((preds - self.Yts) ** 2)
-
-    def val_loss_grads(self, params, hparams):
-        o_loss = self.val_loss(params, hparams)
-        return (
-            torch.autograd.grad(o_loss, params, allow_unused=True, create_graph=True,
-                                retain_graph=True),
-            torch.autograd.grad(o_loss, hparams, allow_unused=True, create_graph=True,
-                                retain_graph=True)
-        )
-
-    def param_derivative(self, params, hparams):
-        """Derivative of the training loss, with respect to the parameters"""
-        alpha = params[0]
-        penalty, sigma = hparams
-        N = self.Xtr.shape[0]
-        ny_points = self.flk.ny_points_
-
-        kernel = DiffGaussianKernel(sigma, self.opt)
-
-        # 2/N * (K_MN(K_NM @ alpha - Y)) + 2*lambda*(K_MM @ alpha)
-        out = 2 * ((1/N) * kernel.mmv(
-            ny_points, self.Xtr, kernel.mmv(self.Xtr, ny_points, alpha, opt=self.opt) - self.Ytr, opt=self.opt) +
-              torch.exp(-penalty) * kernel.mmv(ny_points, ny_points, alpha, opt=self.opt))
-        return out
-
-    def mixed_vector_product(self, hparams, first_derivative, vector):
-        return torch.autograd.grad(first_derivative, hparams, grad_outputs=vector,
-                                   allow_unused=True)
-
-    def hessian_vector_product(self, params, first_derivative, vector):
-        hvp = torch.autograd.grad(first_derivative, params, grad_outputs=vector,
-                                  retain_graph=True)
-        return hvp
-
-
-def my_hypergrad(params: Sequence[torch.Tensor],
-                 hparams: Sequence[torch.Tensor],
-                 krr: AbstractHypergradModule,
-                 cg_steps: int,
-                 cg_tol: float = 1e-4,
-                 set_grad: bool = True
-                 ):
-    params = [w.detach().requires_grad_(True) for w in params]
-    grad_outer_params, grad_outer_hparams = krr.val_loss_grads(params, hparams)
-
-    # Define a function which calculates the Hessian-vector product of the inner-loss
-    first_diff = krr.param_derivative(params, hparams)
-    # w_mapped = fp_map(params, hparams)
-    # def hvp(vec):
-    #     Jfp = torch.autograd.grad(w_mapped, params, grad_outputs=vec, retain_graph=True)
-    #     return Jfp
-    # Calculate the Hessian multiplied by the outer-gradient wrt alpha
-    hvp = partial(krr.hessian_vector_product, params, first_diff)
-    vs = cg(hvp, grad_outer_params, max_iter=cg_steps, epsilon=cg_tol)
-    # Multiply the mixed inner gradient by `vs`
-    grads = krr.mixed_vector_product(hparams, first_derivative=first_diff, vector=vs)
-    # grads = torch.autograd.grad(first_diff, hparams, grad_outputs=vs, allow_unused=True)
-
-    final_grads = []
-    for ohp, g in zip(grad_outer_hparams, grads):
-        if ohp is not None:
-            final_grads.append(ohp - g)
-        else:
-            final_grads.append(-g)
-
-    if set_grad:
-        update_tensor_grads(hparams, final_grads)
-
-    return {'val_loss': krr.val_loss(params, hparams), 'h_grads': final_grads}
-
-
-def update_tensor_grads(hparams, grads):
-    for l, g in zip(hparams, grads):
-        if l.grad is None:
-            l.grad = torch.zeros_like(l)
-        if g is not None:
-            l.grad += g
 
 
 def test_krr_ho():
@@ -359,24 +117,25 @@ def test_flk_ho():
         params = flk_helper.inner_opt(params, hparams)
 
         outer_opt.zero_grad()
-        hgrad_out = my_hypergrad(params, hparams, krr=flk_helper,
-                                 cg_steps=hessian_cg_steps, cg_tol=hessian_cg_tol, set_grad=True)
+        hgrad_out = compute_hypergrad(params, hparams, krr=flk_helper,
+                                 cg_steps=hessian_cg_steps, cg_tol=hessian_cg_tol, set_grad=True,
+                                 timings=True)
         outer_opt.step()
         hparams[0].data.clamp_(min=1e-10)
         hparams[1].data.clamp_(min=1e-10)
-        print("VAL LOSS", hgrad_out['val_loss'])
         print("GRADIENT", hgrad_out['h_grads'])
         print("NEW HPARAMS", hparams)
+        print("NEW VAL LOSS", hgrad_out['val_loss'])
         print()
         hparam_history.append([h.detach().clone() for h in hparams])
         val_loss_history.append(hgrad_out['val_loss'])
         hgrad_history.append([g.detach() for g in hgrad_out['h_grads']])
 
-    import matplotlib.pyplot as plt
-    fig, ax = plt.subplots()
-    ax.plot(range(len(val_loss_history)), val_loss_history)
-    ax.set_xlabel("Iteration")
-    ax.set_ylabel("Validation loss")
+    # import matplotlib.pyplot as plt
+    # fig, ax = plt.subplots()
+    # ax.plot(range(len(val_loss_history)), val_loss_history)
+    # ax.set_xlabel("Iteration")
+    # ax.set_ylabel("Validation loss")
 
     # fig, ax = plt.subplots()
     # for i in range(len(hparam_history[0])):
