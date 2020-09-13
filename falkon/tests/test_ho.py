@@ -5,20 +5,18 @@ from typing import Tuple, Callable, List, Iterable, Sequence
 import numpy as np
 import torch
 
-from kernels.diff_rbf_kernel import DiffGaussianKernel
-from kernels.tiling_red import TilingGenred
 from pykeops.torch.generic.generic_red import GenredAutograd, Genred
 from sklearn.kernel_ridge import KernelRidge
 
-from falkon.models.fp_map import falkon_fp_map, krr_gd_map
-
+from falkon.tests.cg_torch import cg
 from falkon.tests import cg_torch
 
 import falkon
 from falkon import FalkonOptions
 from falkon.optim import ConjugateGradient
 from falkon.center_selection import UniformSelector, FixedSelector
-from tests.cg_torch import cg
+from falkon.kernels.diff_rbf_kernel import DiffGaussianKernel
+from falkon.kernels.tiling_red import TilingGenred
 
 """ TEST HO FOR KRR """
 
@@ -186,10 +184,12 @@ class FalkonHO(AbstractHypergradModule):
         alpha = params[0]
         penalty, sigma = hparams
 
-        kernel = falkon.kernels.GaussianKernel(sigma.detach())
+        kernel = DiffGaussianKernel(sigma.detach(), self.opt)
+        def sq_err(y_true, y_pred):
+            return torch.mean((y_true - y_pred)**2)
         self.flk = falkon.Falkon(
             kernel,
-            penalty.detach().item(),
+            torch.exp(-penalty.detach()).item(),
             self.M,
             center_selection=self.center_selection,
             maxiter=self.maxiter,
@@ -219,7 +219,7 @@ class FalkonHO(AbstractHypergradModule):
         """Derivative of the training loss, with respect to the parameters"""
         alpha = params[0]
         penalty, sigma = hparams
-        N = alpha.shape[0]
+        N = self.Xtr.shape[0]
         ny_points = self.flk.ny_points_
 
         kernel = DiffGaussianKernel(sigma, self.opt)
@@ -227,7 +227,7 @@ class FalkonHO(AbstractHypergradModule):
         # 2/N * (K_MN(K_NM @ alpha - Y)) + 2*lambda*(K_MM @ alpha)
         out = 2 * ((1/N) * kernel.mmv(
             ny_points, self.Xtr, kernel.mmv(self.Xtr, ny_points, alpha, opt=self.opt) - self.Ytr, opt=self.opt) +
-              penalty * kernel.mmv(ny_points, ny_points, alpha, opt=self.opt))
+              torch.exp(-penalty) * kernel.mmv(ny_points, ny_points, alpha, opt=self.opt))
         return out
 
     def mixed_vector_product(self, hparams, first_derivative, vector):
@@ -335,16 +335,18 @@ def test_flk_ho():
     d = 3
     M = 100
     outer_lr = 0.6
-    outer_steps = 100
+    outer_steps = 200
     hessian_cg_steps = 20
     hessian_cg_tol = 1e-4
     Xtr, Ytr, Xts, Yts = gen_data(n, d, test_amount=100, dtype=torch.float32)
+    Xtr[:,0] *= 1
+    Xts[:,0] *= 1
 
     hparams = [
-        torch.tensor(1e-5, requires_grad=True, dtype=Xtr.dtype),  # Penalty
+        torch.tensor(1e-1, requires_grad=True, dtype=Xtr.dtype),  # Penalty
         torch.tensor([2, 2, 2], requires_grad=True, dtype=Xtr.dtype),  # Sigma
     ]
-    outer_opt = torch.optim.SGD(lr=outer_lr, params=hparams)
+    outer_opt = torch.optim.Adam(lr=outer_lr, params=hparams)
     flk_helper = FalkonHO(M, Xtr, Ytr, Xts, Yts)
 
     hparam_history = []

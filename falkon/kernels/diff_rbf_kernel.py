@@ -5,10 +5,10 @@ from typing import Union, Optional
 import torch
 
 from falkon import FalkonOptions
-from kernels import GaussianKernel
-from kernels.tiling_red import TilingGenred
-from mmv_ops.keops import _decide_backend, _keops_dtype
-from utils.helpers import check_same_device
+from falkon.kernels import GaussianKernel
+from falkon.kernels.tiling_red import TilingGenred
+from falkon.mmv_ops.keops import _decide_backend, _keops_dtype
+from falkon.utils.helpers import check_same_device
 
 
 class DiffGaussianKernel(GaussianKernel):
@@ -17,19 +17,13 @@ class DiffGaussianKernel(GaussianKernel):
 
     @staticmethod
     def _get_sigma_kt(sigma: torch.Tensor):
-        try:
-            # tensor.item() works if tensor is a scalar, otherwise it throws
-            # a value error.
-            sigma.item()
-            return sigma, "single"
-        except ValueError:
-            return sigma, "multi"
+        return sigma, "single"
 
     def _sigma2gamma(self, sigma: torch.Tensor):
         return sigma
 
     def _keops_mmv_impl(self, X1, X2, v, kernel, out, opt: FalkonOptions):
-        formula = 'Exp(SqDist(x1 / g, x2 / g) * Inv(-2)) * v'
+        formula = 'Exp(SqDist(x1 / g, x2 / g) * IntInv(-2)) * v'
         aliases = [
             'x1 = Vi(%d)' % (X1.shape[1]),
             'x2 = Vj(%d)' % (X2.shape[1]),
@@ -37,30 +31,6 @@ class DiffGaussianKernel(GaussianKernel):
             'g = Pm(%d)' % (self.gamma.shape[0]),
         ]
         other_vars = [self.gamma.to(device=X1.device, dtype=X1.dtype)]
-
-        # if self.gaussian_type == 'single':
-        #     formula = 'Exp(g * SqDist(x1, x2)) * v'
-        #     aliases = [
-        #         'x1 = Vi(%d)' % (X1.shape[1]),
-        #         'x2 = Vj(%d)' % (X2.shape[1]),
-        #         'v = Vj(%d)' % (v.shape[1]),
-        #         'g = Pm(1)'
-        #     ]
-        #     other_vars = [self.gamma.to(device=X1.device, dtype=X1.dtype)]
-        # else:
-        #     dim = self.gamma.shape[0]
-        #     formula = (
-        #         'Exp( -IntInv(2) * SqDist('
-        #         f'TensorDot(x1, g, Ind({dim}), Ind({dim}, {dim}), Ind(0), Ind(0)), '
-        #         f'TensorDot(x2, g, Ind({dim}), Ind({dim}, {dim}), Ind(0), Ind(0)))) * v'
-        #     )
-        #     aliases = [
-        #         'x1 = Vi(%d)' % (X1.shape[1]),
-        #         'x2 = Vj(%d)' % (X2.shape[1]),
-        #         'v = Vj(%d)' % (v.shape[1]),
-        #         'g = Pm(%d)' % (dim ** 2)
-        #     ]
-        #     other_vars = [self.gamma.reshape(-1).to(device=X1.device, dtype=X1.dtype)]
 
         # Choose backend
         N, D = X1.shape
@@ -86,6 +56,23 @@ class DiffGaussianKernel(GaussianKernel):
 
     def _decide_dmmv_impl(self, X1, X2, v, w, opt: FalkonOptions):
         return functools.partial(self.keops_dmmv_helper, mmv_fn=self._keops_mmv_impl)
+
+    def _prepare(self, X1, X2):
+        return super()._prepare(X1.div(self.gamma), X2.div(self.gamma))
+
+    def _apply(self, X1, X2, out):
+        if X1.shape[0] == self.gamma.shape[0]:
+            X1 = X1.div(self.gamma)
+            X2 = (X2.T.div(self.gamma)).T
+        else:
+            X1 = X1.div(self.gamma)
+            X2 = (X2.T.div(self.gamma)).T
+        return super()._apply(X1, X2, out)
+
+    def _transform(self, A) -> torch.Tensor:
+        A.mul_(-0.5)
+        A.exp_()
+        return A
 
     def __repr__(self):
         return f"DiffGaussianKernel(sigma={self.sigma})"
