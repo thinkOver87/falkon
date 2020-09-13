@@ -1,5 +1,16 @@
 
-class FalkonHO(AbstractHypergradModule):
+import numpy as np
+import torch
+
+import falkon
+from falkon.options import FalkonOptions
+from falkon.center_selection import UniformSelector, FixedSelector
+from falkon.kernels.diff_rbf_kernel import DiffGaussianKernel
+from falkon.hypergrad.common import AbsHypergradModel
+
+
+
+class FalkonHO(AbsHypergradModel):
     def __init__(self, M, Xtr, Ytr, Xts, Yts):
         super().__init__()
         self.Xtr = Xtr

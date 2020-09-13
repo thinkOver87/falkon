@@ -1,5 +1,5 @@
 import abc
-from typing import Sequence, Optional, Tuple
+from typing import Sequence, Optional, Tuple, Union
 
 import torch
 

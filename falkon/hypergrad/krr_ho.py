@@ -1,7 +1,7 @@
 import torch
 
 
-from falkon.hypergrad.common import AbstractHypergrad
+from falkon.hypergrad.common import AbsHypergradModel
 
 
 def naive_diff_rbf_kernel(self, X1, X2, sigma):
@@ -12,7 +12,7 @@ def naive_diff_rbf_kernel(self, X1, X2, sigma):
     return torch.exp(D)
 
 
-class KRR(AbstractHypergrad):
+class KRR(AbsHypergradModel):
     def __init__(self, lr, Xtr, Ytr, Xts, Yts):
         super().__init__()
         self.Xtr = Xtr

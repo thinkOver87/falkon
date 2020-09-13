@@ -1,5 +1,5 @@
 from functools import partial
-from typing import Sequence
+from typing import Sequence, Tuple, List
 import time
 
 import torch
@@ -62,7 +62,6 @@ def compute_hypergrad(params: Sequence[torch.Tensor],
 
     # Calculate the Hessian multiplied by the outer-gradient wrt alpha
     hvp = partial(model.hessian_vector_product, params, first_diff)
-    cg_optimizer = ConjugateGradient(opt=cg_opt)
     vs = cg(hvp, grad_outer_params, max_iter=cg_steps, epsilon=cg_tol)
     cg_time = time.time()
 

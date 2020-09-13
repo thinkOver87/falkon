@@ -110,26 +110,31 @@ def test_flk_ho():
     hparam_history = []
     val_loss_history = []
     hgrad_history = []
+    import time
 
+    params = [torch.zeros(M, 1, requires_grad=True, dtype=torch.float32)]
     for o_step in range(outer_steps):
         # Run inner loop to get alpha_*
-        params = [torch.zeros(M, 1, requires_grad=True, dtype=torch.float32)]
+        i_start = time.time()
         params = flk_helper.inner_opt(params, hparams)
+        inner_opt_t = time.time()
 
         outer_opt.zero_grad()
-        hgrad_out = compute_hypergrad(params, hparams, krr=flk_helper,
+        hgrad_out = compute_hypergrad(params, hparams, model=flk_helper,
                                  cg_steps=hessian_cg_steps, cg_tol=hessian_cg_tol, set_grad=True,
                                  timings=True)
         outer_opt.step()
         hparams[0].data.clamp_(min=1e-10)
         hparams[1].data.clamp_(min=1e-10)
-        print("GRADIENT", hgrad_out['h_grads'])
+        i_end = time.time()
+        print("Iteration took %.2fs (inner-opt %.2fs, outer-opt %.2fs)" % (i_end - i_start, inner_opt_t - i_start, i_end - inner_opt_t))
+        print("GRADIENT", hgrad_out[1])
         print("NEW HPARAMS", hparams)
-        print("NEW VAL LOSS", hgrad_out['val_loss'])
+        print("NEW VAL LOSS", hgrad_out[0])
         print()
         hparam_history.append([h.detach().clone() for h in hparams])
-        val_loss_history.append(hgrad_out['val_loss'])
-        hgrad_history.append([g.detach() for g in hgrad_out['h_grads']])
+        val_loss_history.append(hgrad_out[0])
+        hgrad_history.append([g.detach() for g in hgrad_out[1]])
 
     # import matplotlib.pyplot as plt
     # fig, ax = plt.subplots()
