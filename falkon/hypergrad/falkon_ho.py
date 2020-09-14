@@ -1,4 +1,3 @@
-
 import numpy as np
 import torch
 
@@ -11,7 +10,7 @@ from falkon.hypergrad.common import AbsHypergradModel
 
 
 class FalkonHO(AbsHypergradModel):
-    def __init__(self, M, Xtr, Ytr, Xts, Yts):
+    def __init__(self, M, maxiter, Xtr, Ytr, Xts, Yts, opt):
         super().__init__()
         self.Xtr = Xtr
         self.Ytr = Ytr
@@ -19,11 +18,11 @@ class FalkonHO(AbsHypergradModel):
         self.Yts = Yts
 
         self.M = M
-        self.opt = FalkonOptions(use_cpu=True)
+        self.maxiter = maxiter
+        self.opt = opt
 
         centers = UniformSelector(np.random.default_rng(10)).select(self.Xtr, None, M)
         self.center_selection = FixedSelector(centers)
-        self.maxiter = 10
 
     def inner_opt(self, params, hparams):
         """This is NOT DIFFERENTIABLE"""
@@ -34,7 +33,7 @@ class FalkonHO(AbsHypergradModel):
             kernel = DiffGaussianKernel(sigma.detach(), self.opt)
             def sq_err(y_true, y_pred):
                 return torch.mean((y_true - y_pred)**2)
-            self.flk = falkon.Falkon(
+            self.flk = self.flk_class(
                 kernel,
                 torch.exp(-penalty.detach()).item(),
                 self.M,
@@ -87,3 +86,75 @@ class FalkonHO(AbsHypergradModel):
         hvp = torch.autograd.grad(first_derivative, params, grad_outputs=vector,
                                   retain_graph=True)
         return hvp
+
+    def to(self, device):
+        self.Xtr = self.Xtr.to(device)
+        self.Ytr = self.Ytr.to(device)
+        self.Xts = self.Xts.to(device)
+        self.Yts = self.Yts.to(device)
+        return self
+
+    @property
+    def flk_class(self):
+        if self.Xtr.device.type == 'cuda':
+            return falkon.InCoreFalkon
+        return falkon.Falkon
+
+    @property
+    def model(self):
+        return self.flk
+
+
+
+def run_falkon_hypergrad(data,
+                         falkon_M,
+                         falkon_maxiter,
+                         falkon_opt,
+                         outer_lr,
+                         outer_steps,
+                         hessian_cg_steps,
+                         hessian_cg_tol,
+                         debug):
+    import time
+    Xtr, Ytr, Xts, Yts = data['Xtr'], data['Ytr'], data['Xts'], data['Yts']
+
+    n, d = Xtr.size()
+    dt, dev = Xtr.dtype, Xtr.device
+
+    hparams = [
+        torch.tensor(1e-1, requires_grad=True, dtype=dt, device=dev),  # Penalty
+        torch.tensor([2] * d, requires_grad=True, dtype=dt, device=dev),  # Sigma
+    ]
+    params = [torch.zeros(falkon_M, 1, requires_grad=True, dtype=dt, device=dev)]
+
+    outer_opt = torch.optim.Adam(lr=outer_lr, params=hparams)
+    flk_helper = FalkonHO(falkon_M, falkon_maxiter, Xtr, Ytr, Xts, Yts, falkon_opt)
+
+    hparam_history = []
+    val_loss_history = []
+    hgrad_history = []
+    for o_step in range(outer_steps):
+        # Run inner loop to get alpha_*
+        i_start = time.time()
+        params = flk_helper.inner_opt(params, hparams)
+        inner_opt_t = time.time()
+
+        outer_opt.zero_grad()
+        hgrad_out = compute_hypergrad(params, hparams, model=flk_helper,
+                                      cg_steps=hessian_cg_steps, cg_tol=hessian_cg_tol, set_grad=True,
+                                      timings=debug)
+        outer_opt.step()
+        hparams[0].data.clamp_(min=1e-10)
+        hparams[1].data.clamp_(min=1e-10)
+        i_end = time.time()
+        if debug:
+            print("Iteration took %.2fs (inner-opt %.2fs, outer-opt %.2fs)" % (i_end - i_start, inner_opt_t - i_start, i_end - inner_opt_t))
+            print("GRADIENT", hgrad_out[1])
+            print("NEW HPARAMS", hparams)
+            print("NEW VAL LOSS", hgrad_out[0])
+            print()
+        hparam_history.append([h.detach().clone() for h in hparams])
+        val_loss_history.append(hgrad_out[0])
+        hgrad_history.append([g.detach() for g in hgrad_out[1]])
+
+    return hparam_history, val_loss_history, hgrad_history, flk_helper.model
