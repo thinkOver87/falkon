@@ -62,7 +62,7 @@ def compute_hypergrad(params: Sequence[torch.Tensor],
 
     # Calculate the Hessian multiplied by the outer-gradient wrt alpha
     hvp = partial(model.hessian_vector_product, params, first_diff)
-    vs = cg(hvp, grad_outer_params, max_iter=cg_steps, epsilon=cg_tol)
+    vs, cg_iter_completed, hvp_time = cg(hvp, grad_outer_params, max_iter=cg_steps, epsilon=cg_tol)
     cg_time = time.time()
 
     # Multiply the mixed inner gradient by `vs`
@@ -85,7 +85,7 @@ def compute_hypergrad(params: Sequence[torch.Tensor],
     end_time = time.time()
     if timings:
         print(f"Total time: {end_time - time_s:.2f}s - val-grad {val_time - time_s:.2f}s - "
-              f"param-diff {first_diff_time - val_time:.2f}s - cg-time {cg_time - first_diff_time:.2f}s - "
+                f"param-diff {first_diff_time - val_time:.2f}s - cg-time({cg_iter_completed}) {cg_time - first_diff_time:.2f}s (1 hvp: {hvp_time:.2f}s) - "
               f"mixed-time {mixed_time - cg_time:.2f}s")
 
     return model.val_loss(params, hparams), final_grads
@@ -99,6 +99,7 @@ def cg(Ax, b, x0=None, max_iter=100, epsilon=1.0e-5):
       Returns:
         x_star: list of tensors
     """
+    app_times = []
     if x0 is None:
         x_last = [torch.zeros_like(bb) for bb in b]
         r_last = [torch.zeros_like(bb).copy_(bb) for bb in b]
@@ -108,7 +109,9 @@ def cg(Ax, b, x0=None, max_iter=100, epsilon=1.0e-5):
         r_last = [bb - mmmvs for (bb, mmmvs) in zip(b, mmvs)]
     p_last = [torch.zeros_like(rr).copy_(rr) for rr in r_last]
     for ii in range(max_iter):
+        t_s = time.time()
         Ap = Ax(p_last)
+        app_times.append(time.time() - t_s)
         Ap_vec = cat_list_to_tensor(Ap)
         p_last_vec = cat_list_to_tensor(p_last)
         r_last_vec = cat_list_to_tensor(r_last)
@@ -130,7 +133,7 @@ def cg(Ax, b, x0=None, max_iter=100, epsilon=1.0e-5):
         p_last = p
         r_last = r
 
-    return x_last
+    return x_last, ii, min(app_times)
 
 
 def cat_list_to_tensor(list_tx):

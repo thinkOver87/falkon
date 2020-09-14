@@ -61,12 +61,13 @@ class DiffGaussianKernel(GaussianKernel):
         return super()._prepare(X1.div(self.gamma), X2.div(self.gamma))
 
     def _apply(self, X1, X2, out):
-        if X1.shape[0] == self.gamma.shape[0]:
-            X1 = X1.div(self.gamma)
-            X2 = (X2.T.div(self.gamma)).T
+        gamma = self.gamma.to(device=X1.device, dtype=X1.dtype)
+        if X1.shape[0] == gamma.shape[0]:
+            X1 = X1.div(gamma)
+            X2 = (X2.T.div(gamma)).T
         else:
-            X1 = X1.div(self.gamma)
-            X2 = (X2.T.div(self.gamma)).T
+            X1 = X1.div(gamma)
+            X2 = (X2.T.div(gamma)).T
         return super()._apply(X1, X2, out)
 
     def _transform(self, A) -> torch.Tensor:

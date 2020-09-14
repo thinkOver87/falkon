@@ -6,6 +6,7 @@ from falkon.options import FalkonOptions
 from falkon.center_selection import UniformSelector, FixedSelector
 from falkon.kernels.diff_rbf_kernel import DiffGaussianKernel
 from falkon.hypergrad.common import AbsHypergradModel
+from falkon.hypergrad.hypergrad import compute_hypergrad
 
 
 
@@ -81,11 +82,15 @@ class FalkonHO(AbsHypergradModel):
                                    allow_unused=True)
 
     def hessian_vector_product(self, params, first_derivative, vector):
-        # Here we need to retain the graph, since we will call the function
-        # multiple times within the conjugate-gradient procedure.
-        hvp = torch.autograd.grad(first_derivative, params, grad_outputs=vector,
-                                  retain_graph=True)
-        return hvp
+        N = self.Xtr.shape[0]
+        ny_points = self.flk.ny_points_
+        kernel = self.flk.kernel
+        penalty = torch.tensor(self.flk.penalty)
+        vector = vector[0]
+
+        out = 2 * ((1/N) * kernel.mmv(ny_points, self.Xtr, kernel.mmv(self.Xtr, ny_points, vector, opt=self.opt), opt=self.opt) + \
+                torch.exp(-penalty) * kernel.mmv(ny_points, ny_points, vector, opt=self.opt))
+        return [out]
 
     def to(self, device):
         self.Xtr = self.Xtr.to(device)
@@ -114,6 +119,7 @@ def run_falkon_hypergrad(data,
                          outer_steps,
                          hessian_cg_steps,
                          hessian_cg_tol,
+                         callback,
                          debug):
     import time
     Xtr, Ytr, Xts, Yts = data['Xtr'], data['Ytr'], data['Xts'], data['Yts']
@@ -148,10 +154,12 @@ def run_falkon_hypergrad(data,
         hparams[1].data.clamp_(min=1e-10)
         i_end = time.time()
         if debug:
-            print("Iteration took %.2fs (inner-opt %.2fs, outer-opt %.2fs)" % (i_end - i_start, inner_opt_t - i_start, i_end - inner_opt_t))
-            print("GRADIENT", hgrad_out[1])
+            print("[%4d/%4d] - time %.2fs (inner-opt %.2fs, outer-opt %.2fs)" % (o_step, outer_steps, i_end - i_start, inner_opt_t - i_start, i_end - inner_opt_t))
+            #print("GRADIENT", hgrad_out[1])
             print("NEW HPARAMS", hparams)
             print("NEW VAL LOSS", hgrad_out[0])
+            if callback is not None:
+                callback(flk_helper.model)
             print()
         hparam_history.append([h.detach().clone() for h in hparams])
         val_loss_history.append(hgrad_out[0])
