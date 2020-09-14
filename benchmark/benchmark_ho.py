@@ -1,6 +1,7 @@
 import argparse
 import time
 import datetime
+from typing import Optional, List
 
 import torch
 import numpy as np
@@ -40,9 +41,7 @@ def run_on_dataset(dset: Dataset,
     Ytr = Ytr.pin_memory()
     # Further split the data into train/validation
     idx_tr, idx_val = equal_split(Xtr.shape[0], 0.8)
-    Xval, Yval = Xtr[idx_val,:], Ytr[idx_val,:]
-    Xtr, Ytr = Xtr[idx_tr,:], Ytr[idx_tr,:]
-    data = {'Xtr': Xtr, 'Ytr': Ytr, 'Xts': Xval, 'Yts': Yval}
+    data = {'Xtr': Xtr[idx_tr, :], 'Ytr': Ytr[idx_tr, :], 'Xts': Xtr[idx_val, :], 'Yts': Ytr[idx_val, :]}
 
     # Options and parameters
     opt = falkon.FalkonOptions(
@@ -53,8 +52,15 @@ def run_on_dataset(dset: Dataset,
         debug=False
     )
     hessian_cg_steps = 20
-    hessian_cg_tol = 1e-3
+    hessian_cg_tol = 1e-6
     debug = True
+
+    def cback(model):
+        test_preds = model.predict(Xts)
+        for err_fn in err_fns:
+            err, err_name = err_fn(Yts, test_preds, **kwargs)
+            print(f"Trained on train, test {err_name} = {err:.5f}")
+
 
     with TicToc("Hyperparameter optimization"):
         out_dict = run_falkon_hypergrad(data=data,
@@ -65,6 +71,7 @@ def run_on_dataset(dset: Dataset,
                                         outer_steps=outer_iter,
                                         hessian_cg_steps=hessian_cg_steps,
                                         hessian_cg_tol=hessian_cg_tol,
+                                        callback=cback,
                                         debug=True)
     hparam_history, val_loss_history, hgrad_history, model = out_dict
     # Refit model
@@ -72,7 +79,7 @@ def run_on_dataset(dset: Dataset,
     test_preds = model.predict(Xts)
     for err_fn in err_fns:
         test_error, err_name = err_fn(Yts, test_preds, **kwargs)
-    print(f"Test {err_name} = {test_error:.5f}")
+        print(f"Test {err_name} = {test_error:.5f}")
 
 
 if __name__ == "__main__":

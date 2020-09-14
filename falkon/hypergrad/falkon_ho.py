@@ -1,4 +1,5 @@
 import dataclasses
+import time
 
 import numpy as np
 import torch
@@ -9,6 +10,7 @@ from falkon.center_selection import UniformSelector, FixedSelector
 from falkon.kernels.diff_rbf_kernel import DiffGaussianKernel
 from falkon.hypergrad.common import AbsHypergradModel
 from falkon.hypergrad.hypergrad import compute_hypergrad
+from falkon.optim import FalkonConjugateGradient, ConjugateGradient
 
 
 
@@ -94,16 +96,27 @@ class FalkonHO(AbsHypergradModel):
         return [out]
 
     def solve_hessian(self, params, hparams, vector, max_iter, cg_tol):
-        penalty = torch.tensor(self.flk.penalty)
+        penalty = torch.exp(-torch.tensor(self.flk.penalty))
 
         opt = dataclasses.replace(self.opt, cg_tolerance=cg_tol)
+        vector = vector[0].detach()
+        N = self.Xtr.shape[0]
 
-        cg = FalkonConjugateGradient(self.flk.kernel, self.flk.precond, opt)
+        cg = ConjugateGradient(opt)
+        kernel = self.flk.kernel
+        precond = self.flk.precond
+
         start_time = time.time()
-        d = cg.solve(X=self.Xtr, M=self.flk.ny_points_, Y=vector, _lambda=torch.exp(-penalty), initial_solution=None, max_iter=max_iter)
+        B = precond.apply_t(vector / N)
+        def mmv(sol):
+            v = precond.invA(sol)
+            cc = kernel.dmmv(self.Xtr, self.flk.ny_points_, precond.invT(v), None)
+            return precond.invAt(precond.invTt(cc / N) + penalty * v)
+        d = cg.solve(X0=None, B=B, mmv=mmv, max_iter=max_iter)
+        c = precond.apply(d)
         elapsed = time.time() - start_time
 
-        return self.flk.precond.apply(d), max_iter, elapsed / max_iter
+        return [c], max_iter, elapsed / max_iter
 
     def to(self, device):
         self.Xtr = self.Xtr.to(device)
