@@ -1,3 +1,5 @@
+import dataclasses
+
 import numpy as np
 import torch
 
@@ -72,9 +74,8 @@ class FalkonHO(AbsHypergradModel):
         kernel = DiffGaussianKernel(sigma, self.opt)
 
         # 2/N * (K_MN(K_NM @ alpha - Y)) + 2*lambda*(K_MM @ alpha)
-        out = 2 * ((1/N) * kernel.mmv(
-            ny_points, self.Xtr, kernel.mmv(self.Xtr, ny_points, alpha, opt=self.opt) - self.Ytr, opt=self.opt) +
-              torch.exp(-penalty) * kernel.mmv(ny_points, ny_points, alpha, opt=self.opt))
+        out = (kernel.mmv(ny_points, self.Xtr, kernel.mmv(self.Xtr, ny_points, alpha, opt=self.opt) - self.Ytr, opt=self.opt) +
+                torch.exp(-penalty) * N * kernel.mmv(ny_points, ny_points, alpha, opt=self.opt))
         return [out]
 
     def mixed_vector_product(self, hparams, first_derivative, vector):
@@ -91,6 +92,18 @@ class FalkonHO(AbsHypergradModel):
         out = 2 * ((1/N) * kernel.mmv(ny_points, self.Xtr, kernel.mmv(self.Xtr, ny_points, vector, opt=self.opt), opt=self.opt) + \
                 torch.exp(-penalty) * kernel.mmv(ny_points, ny_points, vector, opt=self.opt))
         return [out]
+
+    def solve_hessian(self, params, hparams, vector, max_iter, cg_tol):
+        penalty = torch.tensor(self.flk.penalty)
+
+        opt = dataclasses.replace(self.opt, cg_tolerance=cg_tol)
+
+        cg = FalkonConjugateGradient(self.flk.kernel, self.flk.precond, opt)
+        start_time = time.time()
+        d = cg.solve(X=self.Xtr, M=self.flk.ny_points_, Y=vector, _lambda=torch.exp(-penalty), initial_solution=None, max_iter=max_iter)
+        elapsed = time.time() - start_time
+
+        return self.flk.precond.apply(d), max_iter, elapsed / max_iter
 
     def to(self, device):
         self.Xtr = self.Xtr.to(device)

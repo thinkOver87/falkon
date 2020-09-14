@@ -61,8 +61,9 @@ def compute_hypergrad(params: Sequence[torch.Tensor],
     first_diff_time = time.time()
 
     # Calculate the Hessian multiplied by the outer-gradient wrt alpha
-    hvp = partial(model.hessian_vector_product, params, first_diff)
-    vs, cg_iter_completed, hvp_time = cg(hvp, grad_outer_params, max_iter=cg_steps, epsilon=cg_tol)
+    vs, cg_iter_completed, hvp_time = model.solve_hessian(params, hparams, vector=grad_outer_params, max_iter=cg_steps, epsilon=cg_tol)
+    # hvp = partial(model.hessian_vector_product, params, first_diff)
+    # vs, cg_iter_completed, hvp_time = cg(hvp, grad_outer_params, max_iter=cg_steps, epsilon=cg_tol)
     cg_time = time.time()
 
     # Multiply the mixed inner gradient by `vs`
