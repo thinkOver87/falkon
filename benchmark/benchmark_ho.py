@@ -37,6 +37,9 @@ def run_on_dataset(dset: Dataset,
     load_fn = get_load_fn(dset)
     err_fns = get_err_fns(dset)
     Xtr, Ytr, Xts, Yts, kwargs = load_fn(dtype=dtype.to_numpy_dtype(), as_torch=True)
+    Xtr = Xtr[:400_000]
+    Ytr = Ytr[:400_000]
+    print("Subsampled to %d points" % (Xtr.shape[0]))
     Xtr = Xtr.pin_memory()
     Ytr = Ytr.pin_memory()
     # Further split the data into train/validation
@@ -49,10 +52,11 @@ def run_on_dataset(dset: Dataset,
         no_single_kernel=True,
         pc_epsilon_32=1e-6,
         pc_epsilon_64=1e-13,
+        cg_tolerance=1e-4,
         debug=False
     )
     hessian_cg_steps = 20
-    hessian_cg_tol = 1e-6
+    hessian_cg_tol = 1e-4
     debug = True
 
     def cback(model):
