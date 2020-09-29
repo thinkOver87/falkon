@@ -1,3 +1,4 @@
+import math
 import dataclasses
 import time
 
@@ -29,9 +30,11 @@ class FalkonHO(AbsHypergradModel):
         centers = UniformSelector(np.random.default_rng(10)).select(self.Xtr, None, M)
         self.center_selection = FixedSelector(centers)
 
+        self.flk = None
+
     def inner_opt(self, params, hparams):
         """This is NOT DIFFERENTIABLE"""
-        alpha = params[0]
+        alpha, beta = params
         penalty, sigma = hparams
 
         kernel = DiffGaussianKernel(sigma.detach(), self.opt)
@@ -45,8 +48,9 @@ class FalkonHO(AbsHypergradModel):
             maxiter=self.maxiter,
             seed=129,
             options=self.opt)
-        self.flk.fit(self.Xtr, self.Ytr)
-        return [self.flk.alpha_]
+        self.flk.fit(self.Xtr, self.Ytr, alpha=beta.detach().clone())
+
+        return [self.flk.alpha_, self.flk.beta_]
 
     def val_loss(self, params, hparams):
         alpha = params[0]
@@ -76,7 +80,7 @@ class FalkonHO(AbsHypergradModel):
 
         # 2/N * (K_MN(K_NM @ alpha - Y)) + 2*lambda*(K_MM @ alpha)
         out = (kernel.mmv(ny_points, self.Xtr, kernel.mmv(self.Xtr, ny_points, alpha, opt=self.opt) - self.Ytr, opt=self.opt) +
-                torch.exp(-penalty) * N * kernel.mmv(ny_points, ny_points, alpha, opt=self.opt))
+                N * torch.exp(-penalty) * kernel.mmv(ny_points, ny_points, alpha, opt=self.opt))
         return [out]
 
     def mixed_vector_product(self, hparams, first_derivative, vector):
@@ -90,8 +94,8 @@ class FalkonHO(AbsHypergradModel):
         penalty = torch.tensor(self.flk.penalty)
         vector = vector[0]
 
-        out = ((1/N) * kernel.mmv(ny_points, self.Xtr, kernel.mmv(self.Xtr, ny_points, vector, opt=self.opt), opt=self.opt) + \
-                torch.exp(-penalty) * kernel.mmv(ny_points, ny_points, vector, opt=self.opt))
+        out = (kernel.mmv(ny_points, self.Xtr, kernel.mmv(self.Xtr, ny_points, vector, opt=self.opt), opt=self.opt) + \
+                N * torch.exp(-penalty) * kernel.mmv(ny_points, ny_points, vector, opt=self.opt))
         return [out]
 
     def solve_hessian(self, params, hparams, vector, max_iter, cg_tol):
@@ -157,14 +161,16 @@ def run_falkon_hypergrad(data,
         torch.tensor(12, requires_grad=True, dtype=dt, device=dev),  # Penalty
         torch.tensor([1] * d, requires_grad=True, dtype=dt, device=dev),  # Sigma
     ]
-    params = [torch.zeros(falkon_M, t, requires_grad=True, dtype=dt, device=dev)]
+    params = [torch.zeros(falkon_M, t, requires_grad=True, dtype=dt, device=dev),
+              torch.zeros(falkon_M, t, requires_grad=True, dtype=dt, device=dev)]
 
     outer_opt = torch.optim.Adam(lr=outer_lr, params=hparams)
     flk_helper = FalkonHO(falkon_M, falkon_maxiter, Xtr, Ytr, Xts, Yts, falkon_opt)
 
-    hparam_history = []
+    hparam_history = [[h.detach().clone() for h in hparams]]
     val_loss_history = []
     hgrad_history = []
+    time_history = []
     for o_step in range(outer_steps):
         # Run inner loop to get alpha_*
         i_start = time.time()
@@ -191,5 +197,6 @@ def run_falkon_hypergrad(data,
         hparam_history.append([h.detach().clone() for h in hparams])
         val_loss_history.append(hgrad_out[0])
         hgrad_history.append([g.detach() for g in hgrad_out[1]])
+        time_history.append(i_end - i_start)
 
-    return hparam_history, val_loss_history, hgrad_history, flk_helper.model
+    return hparam_history, val_loss_history, hgrad_history, flk_helper.model, time_history

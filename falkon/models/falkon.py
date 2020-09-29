@@ -111,6 +111,7 @@ class Falkon(FalkonBase):
         self.penalty = penalty
         self.maxiter = maxiter
         self._init_cuda()
+        self.beta_ = None
 
     def fit(self,
             X: torch.Tensor,
@@ -170,6 +171,7 @@ class Falkon(FalkonBase):
         self.fit_times_ = []
         self.ny_points_ = None
         self.alpha_ = None
+        self.beta_ = None
 
         t_s = time.time()
         ny_points = self.center_selection.select(X, None, self.M)
@@ -225,6 +227,7 @@ class Falkon(FalkonBase):
                     max_iter=self.maxiter, callback=validation_cback)
 
             self.alpha_ = precond.apply(beta)
+            self.beta_ = beta
             self.ny_points_ = ny_points
         return self
 
