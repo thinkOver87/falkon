@@ -183,16 +183,41 @@ class TestPotrf:
 def test_potrf_speed():
     t = 5000
     mat = gen_random_pd(t, np.float32, F=False, seed=12345)
-    t_s = time.time()
-    our_chol = potrf(mat, upper=False, clean=True, overwrite=False, cuda=False)
-    our_time = time.time() - t_s
 
-    t_s = time.time()
+    our_chol = potrf(mat, upper=False, clean=True, overwrite=False, cuda=False)
+    our_time = 9999
+    for i in range(10):
+        t_s = time.time()
+        our_chol = potrf(mat, upper=False, clean=True, overwrite=False, cuda=False)
+        our_time = min(our_time, time.time() - t_s)
+
     np_chol = np.linalg.cholesky(mat)
-    np_time = time.time() - t_s
+    np_time = 9999
+    for i in range(10):
+        t_s = time.time()
+        np_chol = np.linalg.cholesky(mat)
+        np_time = min(np_time, time.time() - t_s)
 
     np.testing.assert_allclose(np_chol, our_chol, rtol=1e-5)
     print("Time for cholesky(%d): Numpy %.2fs - Our %.2fs" % (t, np_time, our_time))
+
+
+@pytest.mark.benchmark
+def test_copy_speed():
+    t = 10000
+    mat = gen_random(t, t, np.float32, F=False, seed=12)
+    t_upper = 10999
+    for i in range(10):
+        t_s = time.time()
+        copy_triang(mat, upper=True)
+        t_upper = min(t_upper, time.time() - t_s)
+    t_lower = 10999
+    for i in range(10):
+        t_s = time.time()
+        copy_triang(mat, upper=False)
+        t_lower = min(t_lower, time.time() - t_s)
+    print("Time for copying C-contiguous %d-dimensional data: "
+          "upper=%.3fs - lower=%.3fs" % (t, t_upper, t_lower))
 
 
 @pytest.mark.parametrize("preserve_diag", [True, False], ids=["preserve", "no-preserve"])

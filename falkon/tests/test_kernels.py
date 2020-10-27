@@ -117,6 +117,34 @@ class AbstractKernelTester(abc.ABC):
         opt = dataclasses.replace(self.basic_options, use_cpu=cpu, keops_active=keops)
         _run_test(kernel.dmmv, exp_dvw, (A, B, v, w), out=None, rtol=self._RTOL[A.dtype], opt=opt)
 
+    def test_dvw_errors(self, kernel, A, B, v, w, exp_dvw, cpu):
+        opt = dataclasses.replace(self.basic_options, use_cpu=cpu)
+        with pytest.raises(ValueError, match=r"One of v and w must be specified.*"):
+            _run_test(kernel.dmmv, exp_dvw, (A, B, None, None), out=None, rtol=self._RTOL[A.dtype],
+                      opt=opt)
+        with pytest.raises(ValueError, match=r"Matrix X1 must be 2D.*"):
+            _run_test(kernel.dmmv, exp_dvw, (A[:, 0], B, v, w), out=None, rtol=self._RTOL[A.dtype],
+                      opt=opt)
+        with pytest.raises(ValueError, match=r"Matrix X2 must be 2D.*"):
+            _run_test(kernel.dmmv, exp_dvw, (A, B[:, 0], v, w), out=None, rtol=self._RTOL[A.dtype],
+                      opt=opt)
+        with pytest.raises(ValueError, match=r"v must be a vector or a 2D matrix. Found 3D."):
+            _run_test(kernel.dmmv, exp_dvw, (A, B, v.reshape(-1)[:27].reshape(3, 3, 3), None),
+                      out=None, rtol=self._RTOL[A.dtype], opt=opt)
+        with pytest.raises(ValueError, match=r"w must be a vector or a 2D matrix. Found 3D."):
+            _run_test(kernel.dmmv, exp_dvw, (A, B, v, w.reshape(-1)[:27].reshape(3, 3, 3)),
+                      out=None, rtol=self._RTOL[A.dtype], opt=opt)
+        with pytest.raises(ValueError, match=r"Output dimension is incorrect.*"):
+            _run_test(kernel.dmmv, exp_dvw, (A, B, v, w),
+                      out=torch.empty(B.shape[0], v.shape[1] + 1), rtol=self._RTOL[A.dtype],
+                      opt=opt)
+        with pytest.raises(ValueError, match=r"Dimensions of matrix v are incorrect.*"):
+            _run_test(kernel.dmmv, exp_dvw, (A, B, v[:-1, :], w),
+                      out=None, rtol=self._RTOL[A.dtype], opt=opt)
+        with pytest.raises(ValueError, match=r"Dimensions of matrix w are incorrect.*"):
+            _run_test(kernel.dmmv, exp_dvw, (A, B, v, w[:-1, :]),
+                      out=None, rtol=self._RTOL[A.dtype], opt=opt)
+
 
 class TestGaussianKernel(AbstractKernelTester):
     @pytest.fixture(scope="class")

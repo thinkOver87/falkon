@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 import torch
 
-from falkon.center_selection import UniformSelector
+from falkon.center_selection import UniformSelector, FixedSelector
 from falkon.tests.gen_random import gen_random, gen_sparse_matrix
 from falkon.utils import decide_cuda
 
@@ -23,6 +23,33 @@ def colmaj_arr() -> torch.Tensor:
 @pytest.fixture
 def uniform_sel() -> UniformSelector:
     return UniformSelector(np.random.default_rng(0))
+
+
+def test_fixed(rowmaj_arr):
+    # Simple test
+    sel = FixedSelector(rowmaj_arr[:100])
+    out = sel.select(rowmaj_arr, Y=None, M=100)
+    np.testing.assert_array_equal(out, rowmaj_arr[:100])
+
+
+def test_fixed_wrong_m(rowmaj_arr):
+    # Test with wrong M (currently nothing should happen)
+    sel = FixedSelector(rowmaj_arr[:100])
+    out = sel.select(rowmaj_arr, Y=None, M=200)
+    np.testing.assert_array_equal(out, rowmaj_arr[:100])
+
+
+def test_fixed_y(rowmaj_arr):
+    M = 100
+    Y = torch.empty(rowmaj_arr.shape[0], 1, dtype=rowmaj_arr.dtype)
+    sel = FixedSelector(rowmaj_arr[:M])
+    with pytest.raises(RuntimeError, match=r"FixedSelector has no y-centers available.*"):
+        sel.select(rowmaj_arr, Y, M=M)
+
+    sel = FixedSelector(rowmaj_arr[:M], Y[:M])
+    out_x, out_y = sel.select(rowmaj_arr, Y, M=M)
+    np.testing.assert_array_equal(out_x, rowmaj_arr[:M])
+    np.testing.assert_array_equal(out_y, Y[:M])
 
 
 @pytest.mark.parametrize("device", [
