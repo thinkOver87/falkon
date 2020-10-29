@@ -2,11 +2,11 @@
 import torch
 
 import falkon.cuda.cusolver_gpu as cusolver
-from falkon.cuda.cublas_gpu import cublasCreate, cublasDestroy
+from falkon.cuda.cublas_gpu import cublasCreate
 from falkon.options import BaseOptions
 from falkon.utils.devices import get_device_info
 
-__all__ = ("init", "shutdown", "cublas_handle", "cusolver_handle")
+__all__ = ("init", "cublas_handle", "cusolver_handle")
 
 
 def _normalize_device(device):

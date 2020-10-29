@@ -98,7 +98,7 @@ CUDA_EXCEPTIONS = {
 
 # Library Loading
 def load_cudart_library():
-    linux_version_list = [10.2, 10.1, 10.0, 9.2, 9.1, 9.0]
+    linux_version_list = [11.0, 10.2, 10.1, 10.0, 9.2, 9.1, 9.0]
     if 'linux' in sys.platform:
         libcudart_libname_list = ['libcudart.so'] + \
                                  ['libcudart.so.%s' % v for v in linux_version_list]

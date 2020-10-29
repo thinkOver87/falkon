@@ -26,7 +26,7 @@ CUSOLVER_EXCEPTIONS = {
 
 # Library Loading
 def load_cusolver_library():
-    _linux_version_list = [10.2, 10.1, 10.0, 9.2, 9.1, 9.0, 8.0, 7.5, 7.0]
+    _linux_version_list = [11.0, 10.2, 10.1, 10.0, 9.2, 9.1, 9.0, 8.0, 7.5, 7.0]
     if 'linux' in sys.platform:
         _libcusolver_libname_list = ['libcusolver.so'] + \
                                     ['libcusolver.so.%s' % v for v in _linux_version_list]
