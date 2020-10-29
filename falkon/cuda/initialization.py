@@ -70,27 +70,3 @@ def init(opt: BaseOptions):
             if _cusolver_handles.get(i, None) is None:
                 handle = cusolver.cusolverDnCreate()
                 _cusolver_handles[i] = handle
-
-
-def shutdown():
-    """
-    Shutdown libraries used by scikit-cuda.
-
-    Shutdown the CUBLAS, CULA, CUSOLVER, and MAGMA libraries used by
-    high-level functions provided by scikits-cuda.
-
-    Notes
-    -----
-    This function does not shutdown PyCUDA.
-    """
-    global _cublas_handles
-    for i, handle in _cublas_handles.items():
-        if handle is not None:
-            cublasDestroy(handle)
-            _cublas_handles[i] = None
-
-    global _cusolver_handles
-    for i, handle in _cusolver_handles.items():
-        if handle is not None:
-            cusolver.cusolverDnDestroy(handle)
-            _cusolver_handles[i] = None
