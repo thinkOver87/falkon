@@ -10,6 +10,7 @@ from falkon.cuda.cudart_gpu import cuda_memcpy2d_async
 from falkon.utils.cuda_helpers import copy_to_device, copy_to_host
 from falkon.utils.helpers import choose_fn, sizeof_dtype
 from falkon.utils.tensor_helpers import create_fortran
+# noinspection PyUnresolvedReferences
 from falkon.ooc_ops.cuda import cuda_lauum
 
 
@@ -62,6 +63,7 @@ def par_lauum_f_lower(A: torch.Tensor,
             whole_col_r = create_fortran((A.shape[0], max_block_size), A.dtype, tc_device)
         whole_col_b = create_fortran((A.shape[0], max_block_size), A.dtype, tc_device)
         syrk_out = create_fortran((max_block_size, max_block_size), A.dtype, tc_device)
+        syrk_out.fill_(0.0)
         lauum_out = create_fortran((max_block_size, max_block_size), A.dtype, tc_device)
 
         for b in range(len(block_allocs)):
@@ -85,6 +87,7 @@ def par_lauum_f_lower(A: torch.Tensor,
 
             for r in my_rows:
                 if r == b:
+                    s1.synchronize()
                     # SYRK on col_b[bb.length:, :] with output into syrk_out[:bb.length, :bb.length]
                     # C = beta*C + alpha * op(A) @ op(A).T
                     if b_start + bb.length < N:
@@ -203,6 +206,7 @@ def par_lauum_c_lower(A: torch.Tensor,
         whole_col_b = create_fortran((A.shape[0] * max_block_size,), A.dtype, tc_device)
         whole_col_r = create_fortran((A.shape[0] * max_block_size,), A.dtype, tc_device)
         syrk_out = create_fortran((max_block_size, max_block_size), A.dtype, tc_device)
+        syrk_out.fill_(0.0)
         lauum_out = create_fortran((max_block_size, max_block_size), A.dtype, tc_device)
 
         for b in range(len(block_allocs)):

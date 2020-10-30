@@ -1,4 +1,5 @@
 import time
+from typing import Optional
 
 import torch
 
@@ -34,9 +35,9 @@ class Optimizer(object):
 
 
 class ConjugateGradient(Optimizer):
-    def __init__(self, opt: ConjugateGradientOptions = ConjugateGradientOptions()):
+    def __init__(self, opt: Optional[ConjugateGradientOptions] = None):
         super().__init__()
-        self.params = opt
+        self.params = opt or ConjugateGradientOptions()
 
     def solve(self, X0, B, mmv, max_iter, callback=None):
         t_start = time.time()
@@ -126,21 +127,21 @@ class FalkonConjugateGradient(Optimizer):
                 with TicToc("MMV", False):
                     v = prec.invA(sol)
                     v_t = prec.invT(v)
+
                     if Knm is not None:
                         cc = incore_fdmmv(Knm, v_t, None, opt=self.params)
                     else:
                         cc = self.kernel.dmmv(X, M, v_t, None, opt=self.params)
 
                     if X.is_cuda:
-                        with torch.cuda.stream(s1):
+                        with torch.cuda.stream(s1), torch.cuda.device(X.device):
+                            # We must sync before calls to prec.inv* which use a different stream
                             cc_ = cc.div_(n)
                             v_ = v.mul_(_lambda)
                             s1.synchronize()
                             cc_ = prec.invTt(cc_).add_(v_)
                             s1.synchronize()
-                            out = prec.invAt(cc_)
-                            s1.synchronize()
-                            return out
+                            return prec.invAt(cc_)
                     else:
                         return prec.invAt(prec.invTt(cc / n) + _lambda * v)
 
