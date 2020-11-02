@@ -2,6 +2,7 @@ import dataclasses
 import time
 from typing import Union
 
+import pandas as pd
 import numpy as np
 import torch
 
@@ -100,6 +101,12 @@ class FalkonHO(AbsHypergradModel):
                 N * torch.exp(-penalty) * kernel.mmv(ny_points, ny_points, alpha, opt=self.opt))
         return [out]
 
+    def hparam_derivative(self, params, hparams):
+        """Derivative of the training loss with respect to the parameters
+        Unused in hypergradient computation.
+        """
+        pass
+
     def mixed_vector_product(self, hparams, first_derivative, vector):
         return torch.autograd.grad(first_derivative, list(hparams.values()), grad_outputs=vector,
                                    allow_unused=True)
@@ -155,6 +162,50 @@ class FalkonHO(AbsHypergradModel):
     def model(self):
         return self.flk
 
+
+def map_gradient(data,
+                 falkon_centers: CenterSelector,
+                 falkon_M: int,
+                 falkon_maxiter,
+                 falkon_opt,
+                 sigma_type: str):
+    Xtr, Ytr, Xts, Yts = data['Xtr'], data['Ytr'], data['Xts'], data['Yts']
+    t = Ytr.size(1)
+    dt, dev = Xtr.dtype, Xtr.device
+
+    # Choose start value for sigma
+    if sigma_type != 'single':
+        raise ValueError("sigma_type %s invalid for mapping gradient" % (sigma_type))
+
+    params = {
+        'alpha': torch.zeros(falkon_M, t, requires_grad=True, dtype=dt, device=dev),
+        'alpha_pc': torch.zeros(falkon_M, t, requires_grad=True, dtype=dt, device=dev),
+    }
+    penalty_range = np.linspace(1, 20, num=40)
+    sigma_range = np.linspace(1, 20, num=40)
+    hps = []
+    for p in penalty_range:
+        for s in sigma_range:
+            hps.append({
+                'penalty': torch.tensor(p, requires_grad=True, dtype=dt, device=dev),  # e^{-penalty}
+                'sigma': torch.tensor([s], requires_grad=True, dtype=dt, device=dev),
+            })
+
+    flk_helper = FalkonHO(falkon_M, falkon_centers, falkon_maxiter, Xtr, Ytr, Xts, Yts, falkon_opt)
+
+    df = pd.DataFrame(columns=["sigma", "sigma_g", "penalty", "penalty_g", "loss"])
+    for hp in hps:
+        params = flk_helper.inner_opt(params, hp)
+        _, hp_grad = flk_helper.val_loss_grads(params, hp)
+        loss = flk_helper.val_loss(params, hp)
+        df.append({
+            'penalty': hp['penalty'].cpu().item(),
+            'penalty_g': hp_grad[0][0].cpu().item(),
+            'sigma': hp['sigma'][0].cpu().item(),
+            'sigma_g': hp_grad[1][0].cpu().item(),
+            'loss': loss.cpu().item(),
+        })
+    return df
 
 
 def run_falkon_hypergrad(data,

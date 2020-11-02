@@ -3,14 +3,45 @@ import datetime
 
 import numpy as np
 import torch
+import pandas as pd
 
 from falkon import FalkonOptions
 from falkon.center_selection import FixedSelector
-from falkon.hypergrad.falkon_ho import run_falkon_hypergrad
+from falkon.hypergrad.falkon_ho import run_falkon_hypergrad, map_gradient
 
 from datasets import get_load_fn, equal_split
 from benchmark_utils import *
 from error_metrics import get_err_fns
+
+
+def run_gmap_exp(dataset: Dataset,
+                 sigma_type: str,
+                 inner_maxiter: int):
+    Xtr, Ytr, Xts, Yts, metadata = get_load_fn(dataset)(np.float32, as_torch=True)
+    err_fns = get_err_fns(dataset)
+    centers = torch.from_numpy(metadata['centers']).cuda()
+
+    # We use a validation split (redefinition of Xtr, Ytr).
+    train_frac = 0.8
+    idx_tr, idx_val = equal_split(Xtr.shape[0], train_frac=train_frac)
+    Xval, Yval = Xtr[idx_val], Ytr[idx_val]
+    Xtr, Ytr = Xtr[idx_tr], Ytr[idx_tr]
+    print("Splitting data for validation and testing: Have %d train - %d validation samples" %
+          (Xtr.shape[0], Xval.shape[0]))
+    data = {'Xtr': Xtr.cuda(), 'Ytr': Ytr.cuda(), 'Xts': Xval.cuda(), 'Yts': Yval.cuda()}
+
+    falkon_opt = FalkonOptions(use_cpu=False)
+
+    df: pd.DataFrame = map_gradient(data,
+                      falkon_centers=FixedSelector(centers),
+                      falkon_M=centers.shape[0],
+                      falkon_maxiter=inner_maxiter,
+                      falkon_opt=falkon_opt,
+                      sigma_type=sigma_type
+                      )
+    out_fn = f"./gd_map_{dataset}_{int(datetime.datetime.timestamp(datetime.datetime.now()) * 1000)}.csv"
+    print("Saving gradient map to %s" % (out_fn))
+    df.to_csv(out_fn)
 
 
 def run_exp(dataset: Dataset,
@@ -58,7 +89,7 @@ def run_exp(dataset: Dataset,
         hessian_cg_tol=hessian_cg_tol,
         callback=cback,
         debug=True,
-        )
+    )
 
     # Now we have the model, retrain with the full training data and test!
     Xtr = torch.cat([Xtr, Xval], 0).cuda()
@@ -86,13 +117,17 @@ if __name__ == "__main__":
                    default=0.01)
     p.add_argument('--steps', type=int, help="Number of outer-problem steps",
                    default=100)
-    p.add_argument('--hessian-cg-steps', type=int, help="Maximum steps for finding the Hessian via CG",
+    p.add_argument('--hessian-cg-steps', type=int,
+                   help="Maximum steps for finding the Hessian via CG",
                    default=10)
     p.add_argument('--hessian-cg-tol', type=float, help="Tolerance for Hessian CG problem",
                    default=1e-4)
-    p.add_argument('--sigma-type', type=str, help="Use diagonal or single lengthscale for the kernel",
+    p.add_argument('--sigma-type', type=str,
+                   help="Use diagonal or single lengthscale for the kernel",
                    default='single')
-    p.add_argument('--optimize-centers', action='store_true', help="Whether to optimize Nystrom centers")
+    p.add_argument('--optimize-centers', action='store_true',
+                   help="Whether to optimize Nystrom centers")
+    p.add_argument('--map-gradient', action='store_true', help="Creates a gradient map")
 
     args = p.parse_args()
     print("-------------------------------------------")
@@ -102,6 +137,9 @@ if __name__ == "__main__":
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
+
+    if args.map_gradient:
+        run_gmap_exp()
 
     run_exp(dataset=args.dataset,
             inner_maxiter=args.flk_steps,
