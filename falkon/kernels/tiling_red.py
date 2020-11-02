@@ -68,13 +68,15 @@ def _single_gpu_method(proc_idx, queue, device_id):
     return oout
 
 
-def load_keops_fn(formula, aliases, backend, dtype, accuracy_flags, out, *args):
-    fn = LoadKeOps(formula, aliases, dtype, 'torch', include_dirs + accuracy_flags).import_module()
+def load_keops_fn(formula, aliases, backend, dtype, optional_flags, rec_multVar_highdim, out, *args):
+    if rec_multVar_highdim is not None:
+        optional_flags += ['-DMULT_VAR_HIGHDIM=1']
+    fn = LoadKeOps(formula, aliases, dtype, 'torch', optional_flags + include_dirs).import_module()
     tagCPUGPU, tag1D2D, tagHostDevice = get_tag_backend(backend, args, output=out)
     tags = KeopsTags(tagCPUGPU=tagCPUGPU, tag1D2D=tag1D2D, tagHostDevice=tagHostDevice)
     return fn, tags
 
-def run_keops_formula(formula, aliases, backend, dtype, device, ranges, accuracy_flags, out, *args):
+def run_keops_formula(formula, aliases, backend, dtype, device, ranges, optional_flags, rec_multVar_highdim, out, *args):
     myconv, tags = load_keops_fn(formula, aliases, backend, dtype, accuracy_flags, out, *args)
     device_id = device.index or -1
     if out is None:
@@ -89,7 +91,8 @@ def run_mmv_formula(formula: str,
                     backend: str,
                     dtype: str,
                     ranges: tuple,
-                    accuracy_flags: List[str],
+                    optional_flags: List[str],
+                    rec_multVar_highdim,
                     data_device: torch.device,
                     X1: torch.Tensor,
                     X2: torch.Tensor,
@@ -99,7 +102,7 @@ def run_mmv_formula(formula: str,
                     opt: FalkonOptions):
     other_vars = list(other_vars)
     variables = [X1, X2, v] + other_vars
-    myconv, tags = load_keops_fn(formula, aliases, backend, dtype, accuracy_flags, out, *variables)
+    myconv, tags = load_keops_fn(formula, aliases, backend, dtype, optional_flags, rec_multVar_highdim, out, *variables)
 
     # Compile on a small data subset
     device_idx = data_device.index or -1
@@ -107,7 +110,6 @@ def run_mmv_formula(formula: str,
     small_data_variables = [X1[:100], X2[:10], v[:10]] + other_vars
     small_data_out = torch.empty((100, v.shape[1]), dtype=X1.dtype, device=data_device)
     fn(small_data_out, *small_data_variables)
-
 
     if backend.startswith("GPU") and data_device.type == 'cpu':
         # Info about GPUs
@@ -149,7 +151,7 @@ class TilingGenredAutograd(torch.autograd.Function):
     """
     This class is the entry point to pytorch auto grad engine.
     """
-    NUM_NON_GRAD_ARGS = 8
+    NUM_NON_GRAD_ARGS = 9
 
     # noinspection PyMethodOverriding
     @staticmethod
@@ -159,13 +161,25 @@ class TilingGenredAutograd(torch.autograd.Function):
                 backend: str,
                 dtype: str,
                 ranges: Optional[tuple],
-                accuracy_flags: List[str],
+                optional_flags: List[str],
+                rec_multVar_highdim,
                 opt: FalkonOptions,
                 out: Optional[torch.Tensor],
                 X1: torch.Tensor,
                 X2: torch.Tensor,
                 v: torch.Tensor,
                 *args: torch.Tensor):
+        # Context variables: save everything to compute the gradient:
+        ctx.optional_flags = optional_flags.copy()
+        ctx.formula = formula
+        ctx.aliases = aliases
+        ctx.backend = backend
+        ctx.dtype = dtype
+        ctx.ranges = ranges
+        ctx.myconv = conv_module
+        ctx.rec_multVar_highdim = rec_multVar_highdim
+        ctx.device = device
+
         tagCPUGPU, tag1D2D, tagHostDevice = get_tag_backend(backend, args)
         if not check_same_device(out, *args):
             raise ValueError("[KeOps] Input and output arrays must be located on the same device.")
@@ -182,7 +196,8 @@ class TilingGenredAutograd(torch.autograd.Function):
                                            backend=backend,
                                            dtype=dtype,
                                            ranges=ranges,
-                                           accuracy_flags=accuracy_flags,
+                                           optional_flags=optional_flags,
+                                           rec_multVar_highdim=rec_multVar_highdim,
                                            data_device=device,
                                            X1=X1,
                                            X2=X2,
@@ -192,15 +207,6 @@ class TilingGenredAutograd(torch.autograd.Function):
                                            opt=opt
                                            )
 
-        # Context variables: save everything to compute the gradient:
-        ctx.formula = formula
-        ctx.aliases = aliases
-        ctx.backend = backend
-        ctx.dtype = dtype
-        ctx.ranges = ranges
-        ctx.accuracy_flags = accuracy_flags
-        ctx.myconv = conv_module
-        ctx.device = device
 
         # relying on the 'ctx.saved_variables' attribute is necessary
         # if you want to be able to differentiate the output of the backward once again.
@@ -231,7 +237,7 @@ class TilingGenredAutograd(torch.autograd.Function):
         backend = ctx.backend
         dtype = ctx.dtype
         ranges = ctx.ranges
-        accuracy_flags = ctx.accuracy_flags
+        optional_flags = ctx.optional_flags
         device: torch.device = ctx.device
         myconv = ctx.myconv
         args = ctx.saved_tensors[1:]  # Unwrap the saved variables
@@ -265,10 +271,18 @@ class TilingGenredAutograd(torch.autograd.Function):
                 aliases_g = aliases + [eta, resvar]
                 args_g = args + (G, result)  # Don't forget the gradient to backprop !
 
+                # For a reduction of the type sum(F*b), with b a variable, and if we require the gradient
+                # with respect to b, the gradient will be of same type sum(F*eta). So we set again rec_multVar option
+                # in this case.
+                if pos==ctx.rec_multVar_highdim:
+                    rec_multVar_highdim = nargs # nargs is the position of variable eta.
+                else:
+                    rec_multVar_highdim = None
+
                 if cat == 2:  # we're referring to a parameter, so we'll have to sum both wrt 'i' and 'j'
                     # WARNING !! : here we rely on the implementation of DiffT in files in folder keops/core/formulas/reductions
                     # if tagI==cat of V is 2, then reduction is done wrt j, so we need to further sum output wrt i
-                    grad = run_keops_formula(formula_g, aliases_g, backend, dtype, device, ranges, accuracy_flags, None, *args_g)
+                    grad = run_keops_formula(formula_g, aliases_g, backend, dtype, device, ranges, optional_flags, rec_multVar_highdim, None, *args_g)
                     # Then, sum 'grad' wrt 'i' :
                     # I think that '.sum''s backward introduces non-contiguous arrays,
                     # and is thus non-compatible with GenredAutograd: grad = grad.sum(0)
@@ -281,7 +295,7 @@ class TilingGenredAutograd(torch.autograd.Function):
                         x < y)
 
                 else:
-                    grad = run_keops_formula(formula_g, aliases_g, backend, dtype, device, ranges, accuracy_flags, None, *args_g)
+                    grad = run_keops_formula(formula_g, aliases_g, backend, dtype, device, ranges, optional_flags, rec_multVar_highdim, None, *args_g)
 
                     # N.B.: 'grad' is always a full [A, .., B, M, D] or [A, .., B, N, D] or [A, .., B, D] tensor,
                     #       whereas 'arg_ind' may have some broadcasted batched dimensions.
@@ -304,7 +318,7 @@ class TilingGenredAutograd(torch.autograd.Function):
 
 class TilingGenred():
     def __init__(self, formula, aliases, reduction_op='Sum', axis=0, dtype=default_dtype,
-                 opt_arg=None,
+                 opt_arg=None, enable_chunks=True, rec_multVar_highdim=None, optional_flags=[],
                  formula2=None, cuda_type=None, dtype_acc="auto", use_double_acc=False,
                  sum_scheme="auto", opt: FalkonOptions=None):
         if cuda_type:
@@ -312,21 +326,19 @@ class TilingGenred():
             dtype = cuda_type
         self.reduction_op = reduction_op
         reduction_op_internal, formula2 = preprocess(reduction_op, formula2)
-
-        self.accuracy_flags = get_accuracy_flags(dtype_acc, use_double_acc, sum_scheme, dtype,
-                                                 reduction_op_internal)
+        self.optional_flags = optional_flags + get_optional_flags(reduction_op_internal, dtype_acc, use_double_acc, sum_scheme, dtype, enable_chunks)
 
         str_opt_arg = ',' + str(opt_arg) if opt_arg else ''
         str_formula2 = ',' + formula2 if formula2 else ''
 
         self.formula = reduction_op_internal + '_Reduction(' + formula + str_opt_arg + ',' + str(
             axis2cat(axis)) + str_formula2 + ')'
-        self.aliases = complete_aliases(self.formula,
-                                        list(aliases))  # just in case the user provided a tuple
+        self.aliases = complete_aliases(self.formula, list(aliases))  # just in case the user provided a tuple
         self.dtype = dtype
         self.axis = axis
         self.opt_arg = opt_arg
         self.opt = opt
+        self.rec_multVar_highdim = rec_multVar_highdim
 
     def __call__(self, *args, out=None, backend='auto', ranges=None):
         nx, ny = get_sizes(self.aliases, *args)
@@ -348,7 +360,7 @@ class TilingGenred():
             args, ranges, tag_dummy, N = preprocess_half2(args, self.aliases, self.axis, ranges, nx,
                                                           ny)
         out = TilingGenredAutograd.apply(self.formula, self.aliases, backend, self.dtype,
-                                         ranges, self.accuracy_flags, self.opt, out, *args)
+                                         ranges, self.optional_flags, self.rec_multVar_highdim, self.opt, out, *args)
 
         if self.dtype in ('float16', 'half'):
             out = postprocess_half2(out, tag_dummy, self.reduction_op, N)
