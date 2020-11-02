@@ -1,5 +1,5 @@
 from functools import partial
-from typing import Sequence, Tuple, List
+from typing import Sequence, Tuple, List, Dict
 import time
 
 import torch
@@ -7,14 +7,14 @@ import torch
 from falkon.hypergrad.common import AbsHypergradModel
 
 
-def compute_hypergrad(params: Sequence[torch.Tensor],
-                      hparams: Sequence[torch.Tensor],
+def compute_hypergrad(params: Dict[str, torch.Tensor],
+                      hparams: Dict[str, torch.Tensor],
                       model: AbsHypergradModel,
                       cg_steps: int,
                       cg_tol: float = 1e-4,
                       set_grad: bool = True,
                       timings: bool = False,
-                      ) -> Tuple[float, List[torch.Tensor]]:
+                      ) -> Tuple[torch.Tensor, List[torch.Tensor]]:
     r"""Compute the gradient of the model with respect to the hyperparameters on the validation loss
 
     We are given a training loss $\mathcal{L}_T$ and a validation loss $\mathcal{L}_V$, a set of
@@ -25,9 +25,9 @@ def compute_hypergrad(params: Sequence[torch.Tensor],
 
     Parameters
     ----------
-    params : Sequence[torch.Tensor]
+    params : Dict[str, torch.Tensor]
         List of model parameter vectors
-    hparams : Sequence[torch.Tensor]
+    hparams : Dict[str, torch.Tensor]
         List of hyperparameter vectors for the model
     model : AbsHypergradModel
         The hypergradient-enabled model. The model implements all the necessary functions to calculate
@@ -44,7 +44,7 @@ def compute_hypergrad(params: Sequence[torch.Tensor],
 
     Returns
     -------
-    val_loss : float
+    val_loss : scalar torch.Tensor
         The validation loss obtained by the current set of hyperparameters
     h_grads : List[torch.Tensor]
         The hyperparameter gradients
@@ -52,7 +52,7 @@ def compute_hypergrad(params: Sequence[torch.Tensor],
     time_s = time.time()
     # call `detach` to avoid any residual gradient in the parameters to affect
     # the validation loss gradients
-    params = [w.detach().requires_grad_(True) for w in params]
+    params = {k: w.detach().requires_grad_(True) for k, w in params.items()}
     grad_outer_params, grad_outer_hparams = model.val_loss_grads(params, hparams)
     val_time = time.time()
 
@@ -78,7 +78,7 @@ def compute_hypergrad(params: Sequence[torch.Tensor],
             final_grads.append(-g)
 
     if set_grad:
-        for l, g in zip(hparams, final_grads):
+        for l, g in zip(list(hparams.values()), final_grads):
             if l.grad is None:
                 l.grad = torch.zeros_like(l)
             if g is not None:

@@ -1,22 +1,28 @@
-import math
 import dataclasses
 import time
+from typing import Union
 
 import numpy as np
 import torch
 
 import falkon
-from falkon.options import FalkonOptions
-from falkon.center_selection import UniformSelector, FixedSelector
+from falkon.center_selection import UniformSelector, FixedSelector, CenterSelector
 from falkon.kernels.diff_rbf_kernel import DiffGaussianKernel
 from falkon.hypergrad.common import AbsHypergradModel
 from falkon.hypergrad.hypergrad import compute_hypergrad
-from falkon.optim import FalkonConjugateGradient, ConjugateGradient
-
+from falkon.optim import ConjugateGradient
 
 
 class FalkonHO(AbsHypergradModel):
-    def __init__(self, M, maxiter, Xtr, Ytr, Xts, Yts, opt):
+    def __init__(self,
+                 M,
+                 center_selection,
+                 maxiter,
+                 Xtr,
+                 Ytr,
+                 Xts,
+                 Yts,
+                 opt):
         super().__init__()
         self.Xtr = Xtr
         self.Ytr = Ytr
@@ -27,15 +33,17 @@ class FalkonHO(AbsHypergradModel):
         self.maxiter = maxiter
         self.opt = opt
 
-        centers = UniformSelector(np.random.default_rng(10)).select(self.Xtr, None, M)
-        self.center_selection = FixedSelector(centers)
-
+        self.center_selection = center_selection
         self.flk = None
 
     def inner_opt(self, params, hparams):
         """This is NOT DIFFERENTIABLE"""
-        alpha, beta = params
-        penalty, sigma = hparams
+        alpha, beta = params['alpha'], params['alpha_pc']
+        penalty, sigma = hparams['penalty'], hparams['sigma']
+        if 'centers' in hparams:
+            center_selection = FixedSelector(hparams['centers'].detach())
+        else:
+            center_selection = self.center_selection
 
         kernel = DiffGaussianKernel(sigma.detach(), self.opt)
         def sq_err(y_true, y_pred):
@@ -44,37 +52,40 @@ class FalkonHO(AbsHypergradModel):
             kernel,
             torch.exp(-penalty.detach()).item(),
             self.M,
-            center_selection=self.center_selection,
+            center_selection=center_selection,
             maxiter=self.maxiter,
             seed=129,
             options=self.opt)
-        self.flk.fit(self.Xtr, self.Ytr, alpha=beta.detach().clone())
+        self.flk.fit(self.Xtr, self.Ytr, warm_start=beta.detach().clone())
 
-        return [self.flk.alpha_, self.flk.beta_]
+        return {'alpha': self.flk.alpha_, 'alpha_pc': self.flk.beta_}
 
-    def val_loss(self, params, hparams):
-        alpha = params[0]
-        penalty, sigma = hparams
+    def _val_loss_mse(self, params, hparams):
+        alpha = params['alpha']
+        penalty, sigma = hparams['penalty'], hparams['sigma']
         kernel = DiffGaussianKernel(sigma, self.opt)
-        ny_points = self.flk.ny_points_
+        ny_points = self.flk.ny_points_  # Use saved value instead of from hparams to simplify code
         preds = kernel.mmv(self.Xts, ny_points, alpha)
         return torch.mean((preds - self.Yts) ** 2)
+
+    def val_loss(self, params, hparams):
+        return self._val_loss_mse(params, hparams)
 
     def val_loss_grads(self, params, hparams):
         o_loss = self.val_loss(params, hparams)
         return (
-            torch.autograd.grad(o_loss, params, allow_unused=True, create_graph=False,
+            torch.autograd.grad(o_loss, list(params.values()), allow_unused=True, create_graph=False,
                                 retain_graph=True),
-            torch.autograd.grad(o_loss, hparams, allow_unused=True, create_graph=False,
+            torch.autograd.grad(o_loss, list(hparams.values()), allow_unused=True, create_graph=False,
                                 retain_graph=False)
         )
 
     def param_derivative(self, params, hparams):
         """Derivative of the training loss, with respect to the parameters"""
-        alpha = params[0]
-        penalty, sigma = hparams
+        alpha = params['alpha']
+        penalty, sigma = hparams['penalty'], hparams['sigma']
         N = self.Xtr.shape[0]
-        ny_points = self.flk.ny_points_
+        ny_points = self.flk.ny_points_  # Use saved value instead of from hparams to simplify code
 
         kernel = DiffGaussianKernel(sigma, self.opt)
 
@@ -84,17 +95,17 @@ class FalkonHO(AbsHypergradModel):
         return [out]
 
     def mixed_vector_product(self, hparams, first_derivative, vector):
-        return torch.autograd.grad(first_derivative, hparams, grad_outputs=vector,
+        return torch.autograd.grad(first_derivative, list(hparams.values()), grad_outputs=vector,
                                    allow_unused=True)
 
     def hessian_vector_product(self, params, first_derivative, vector):
         N = self.Xtr.shape[0]
-        ny_points = self.flk.ny_points_
+        ny_points = self.flk.ny_points_  # Use saved value instead of from hparams to simplify code
         kernel = self.flk.kernel
         penalty = torch.tensor(self.flk.penalty)
         vector = vector[0]
 
-        out = (kernel.mmv(ny_points, self.Xtr, kernel.mmv(self.Xtr, ny_points, vector, opt=self.opt), opt=self.opt) + \
+        out = (kernel.mmv(ny_points, self.Xtr, kernel.mmv(self.Xtr, ny_points, vector, opt=self.opt), opt=self.opt) +
                 N * torch.exp(-penalty) * kernel.mmv(ny_points, ny_points, vector, opt=self.opt))
         return [out]
 
@@ -141,33 +152,48 @@ class FalkonHO(AbsHypergradModel):
 
 
 def run_falkon_hypergrad(data,
-                         falkon_M,
+                         falkon_centers: CenterSelector,
+                         falkon_M: int,
+                         optimize_centers: bool,
                          falkon_maxiter,
                          falkon_opt,
+                         sigma_type: str,
                          outer_lr,
                          outer_steps,
                          hessian_cg_steps,
                          hessian_cg_tol,
                          callback,
                          debug):
-    import time
     Xtr, Ytr, Xts, Yts = data['Xtr'], data['Ytr'], data['Xts'], data['Yts']
 
     n, d = Xtr.size()
     t = Ytr.size(1)
     dt, dev = Xtr.dtype, Xtr.device
 
-    hparams = [
-        torch.tensor(12, requires_grad=True, dtype=dt, device=dev),  # Penalty
-        torch.tensor([1] * d, requires_grad=True, dtype=dt, device=dev),  # Sigma
-    ]
-    params = [torch.zeros(falkon_M, t, requires_grad=True, dtype=dt, device=dev),
-              torch.zeros(falkon_M, t, requires_grad=True, dtype=dt, device=dev)]
+    # Choose start value for sigma
+    if sigma_type == 'single':
+        start_sigma = [1]
+    elif sigma_type == 'diag':
+        start_sigma = [1] * d
+    else:
+        raise ValueError("sigma_type %s unrecognized" % (sigma_type))
 
-    outer_opt = torch.optim.Adam(lr=outer_lr, params=hparams)
-    flk_helper = FalkonHO(falkon_M, falkon_maxiter, Xtr, Ytr, Xts, Yts, falkon_opt)
+    hparams = {
+        'penalty': torch.tensor(12, requires_grad=True, dtype=dt, device=dev),  # e^{-penalty}
+        'sigma': torch.tensor(start_sigma, requires_grad=True, dtype=dt, device=dev),
+    }
+    params = {
+        'alpha': torch.zeros(falkon_M, t, requires_grad=True, dtype=dt, device=dev),
+        'alpha_pc': torch.zeros(falkon_M, t, requires_grad=True, dtype=dt, device=dev),
+    }
+    # Nystrom centers: Need to decide whether to optimize them as well
+    if optimize_centers:
+        hparams['centers'] = falkon_centers.select(Xtr, Y=None, M=falkon_M)
 
-    hparam_history = [[h.detach().clone() for h in hparams]]
+    outer_opt = torch.optim.Adam(lr=outer_lr, params=hparams.values())
+    flk_helper = FalkonHO(falkon_M, falkon_centers, falkon_maxiter, Xtr, Ytr, Xts, Yts, falkon_opt)
+
+    hparam_history = [[h.detach().clone() for h in hparams.values()]]
     val_loss_history = []
     hgrad_history = []
     time_history = []
@@ -186,15 +212,15 @@ def run_falkon_hypergrad(data,
                                       cg_steps=hessian_cg_steps, cg_tol=hessian_cg_tol, set_grad=True,
                                       timings=debug)
         outer_opt.step()
-        hparams[0].data.clamp_(min=1e-10)
-        hparams[1].data.clamp_(min=1e-10)
+        hparams['penalty'].data.clamp_(min=1e-10)
+        hparams['sigma'].data.clamp_(min=1e-10)
         i_end = time.time()
         if debug:
             print("[%4d/%4d] - time %.2fs (inner-opt %.2fs, outer-opt %.2fs)" % (o_step, outer_steps, i_end - i_start, inner_opt_t - i_start, i_end - inner_opt_t))
             #print("GRADIENT", hgrad_out[1])
             print("NEW HPARAMS", hparams)
             print("NEW VAL LOSS", hgrad_out[0])
-        hparam_history.append([h.detach().clone() for h in hparams])
+        hparam_history.append([h.detach().clone() for h in hparams.values()])
         val_loss_history.append(hgrad_out[0])
         hgrad_history.append([g.detach() for g in hgrad_out[1]])
         time_history.append(i_end - i_start)

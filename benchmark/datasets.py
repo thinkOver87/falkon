@@ -548,6 +548,7 @@ class SusyDataset(BaseDataset):
     def dset_name(self):
         return self._dset_name
 
+
 class CIFAR10Dataset(BaseDataset):
     file_name = "/data/DATASETS/CIFAR10/cifar10.mat"
     ts_file_name = "/data/DATASETS/CIFAR10/cifar10.t.mat"
@@ -597,7 +598,6 @@ class CIFAR10Dataset(BaseDataset):
 
     def dset_name(self):
         return self._dset_name
-
 
 
 class SVHNDataset(BaseDataset):
@@ -745,6 +745,59 @@ class MnistDataset(BaseDataset):
         return self._dset_name
 
 
+class SmallHiggsDataset(BaseDataset):
+    file_name = '/data/DATASETS/HIGGS_UCI/higgs_for_ho.hdf5'
+    _dset_name = 'HIGGSHO'
+
+    @staticmethod
+    def read_centers(dtype):
+        with h5py.File(HiggsDataset.file_name, 'r') as h5py_file:
+            centers = np.array(h5py_file['centers'], dtype=as_np_dtype(dtype))
+        return centers
+
+    @staticmethod
+    def read_data(dtype):
+        with h5py.File(HiggsDataset.file_name, 'r') as h5py_file:
+            X_train = np.array(h5py_file['X_train'], dtype=as_np_dtype(dtype))
+            Y_train = np.array(h5py_file['Y_train'], dtype=as_np_dtype(dtype))
+            X_test = np.array(h5py_file['X_test'], dtype=as_np_dtype(dtype))
+            Y_test = np.array(h5py_file['Y_test'], dtype=as_np_dtype(dtype))
+        X = np.concatenate(X_train, X_test, axis=0)
+        Y = np.concatenate(Y_train, Y_test, axis=0)
+        return X, Y
+
+    @staticmethod
+    def split_data(X, Y, train_frac: Union[float, None]):
+        if train_frac is None:
+            idx_tr = np.arange(10000)
+            idx_ts = np.arange(10000, 30000)
+        else:
+            idx_tr, idx_ts = equal_split(X.shape[0], train_frac)
+        return X[idx_tr], Y[idx_tr], X[idx_ts], Y[idx_ts]
+
+    @staticmethod
+    def preprocess_x(Xtr: np.ndarray, Xts: np.ndarray) -> Tuple[np.ndarray, np.ndarray, dict]:
+        mtr = np.mean(Xtr, axis=0, dtype=np.float64, keepdims=True).astype(Xtr.dtype)
+        vtr = np.var(Xtr, axis=0, dtype=np.float64, ddof=1, keepdims=True).astype(Xtr.dtype)
+
+        Xtr -= mtr
+        Xtr /= vtr
+        Xts -= mtr
+        Xts /= vtr
+
+        return Xtr, Xts, {'centers': SmallHiggsDataset.read_centers(Xtr.dtype)}
+
+    @staticmethod
+    def preprocess_y(Ytr: np.ndarray, Yts: np.ndarray) -> Tuple[np.ndarray, np.ndarray, dict]:
+        """Convert labels from 0, 1 to -1, +1"""
+        Ytr = Ytr * 2 - 1
+        Yts = Yts * 2 - 1
+        return Ytr.reshape((-1, 1)), Yts.reshape((-1, 1)), {}
+
+    def dset_name(self):
+        return self._dset_name
+
+
 """ Public API """
 
 __LOADERS = {
@@ -760,6 +813,7 @@ __LOADERS = {
     Dataset.SVHN: SVHNDataset(),
     Dataset.MNIST_SMALL: MnistSmallDataset(),
     Dataset.CIFAR10: CIFAR10Dataset(),
+    Dataset.HOHIGGS: SmallHiggsDataset(),
 }
 
 

@@ -9,7 +9,6 @@ from pykeops.common.keops_io import LoadKeOps
 from pykeops.common.operations import preprocess, postprocess
 from pykeops.torch.half2_convert import preprocess_half2, postprocess_half2
 from pykeops.common.parse_type import get_type, get_sizes, complete_aliases
-from pykeops.common.parse_type import get_accuracy_flags
 from pykeops.common.utils import axis2cat
 from pykeops.torch import default_dtype, include_dirs
 
