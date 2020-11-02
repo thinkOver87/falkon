@@ -8,7 +8,7 @@ from pykeops.common.get_options import get_tag_backend
 from pykeops.common.keops_io import LoadKeOps
 from pykeops.common.operations import preprocess, postprocess
 from pykeops.torch.half2_convert import preprocess_half2, postprocess_half2
-from pykeops.common.parse_type import get_type, get_sizes, complete_aliases
+from pykeops.common.parse_type import get_type, get_sizes, complete_aliases, get_optional_flags
 from pykeops.common.utils import axis2cat
 from pykeops.torch import default_dtype, include_dirs
 
@@ -71,13 +71,16 @@ def _single_gpu_method(proc_idx, queue, device_id):
 def load_keops_fn(formula, aliases, backend, dtype, optional_flags, rec_multVar_highdim, out, *args):
     if rec_multVar_highdim is not None:
         optional_flags += ['-DMULT_VAR_HIGHDIM=1']
+    #print("Loading formula")
+    #print(optional_flags + include_dirs)
     fn = LoadKeOps(formula, aliases, dtype, 'torch', optional_flags + include_dirs).import_module()
+    #print("Loaded")
     tagCPUGPU, tag1D2D, tagHostDevice = get_tag_backend(backend, args, output=out)
     tags = KeopsTags(tagCPUGPU=tagCPUGPU, tag1D2D=tag1D2D, tagHostDevice=tagHostDevice)
     return fn, tags
 
 def run_keops_formula(formula, aliases, backend, dtype, device, ranges, optional_flags, rec_multVar_highdim, out, *args):
-    myconv, tags = load_keops_fn(formula, aliases, backend, dtype, accuracy_flags, out, *args)
+    myconv, tags = load_keops_fn(formula, aliases, backend, dtype, optional_flags, rec_multVar_highdim, out, *args)
     device_id = device.index or -1
     if out is None:
         out = myconv.genred_pytorch(tags.tagCPUGPU, tags.tag1D2D, tags.tagHostDevice, device_id, ranges, *args)
@@ -171,14 +174,6 @@ class TilingGenredAutograd(torch.autograd.Function):
                 *args: torch.Tensor):
         # Context variables: save everything to compute the gradient:
         ctx.optional_flags = optional_flags.copy()
-        ctx.formula = formula
-        ctx.aliases = aliases
-        ctx.backend = backend
-        ctx.dtype = dtype
-        ctx.ranges = ranges
-        ctx.myconv = conv_module
-        ctx.rec_multVar_highdim = rec_multVar_highdim
-        ctx.device = device
 
         tagCPUGPU, tag1D2D, tagHostDevice = get_tag_backend(backend, args)
         if not check_same_device(out, *args):
@@ -207,6 +202,15 @@ class TilingGenredAutograd(torch.autograd.Function):
                                            opt=opt
                                            )
 
+        # Context variables: save everything to compute the gradient:
+        ctx.formula = formula
+        ctx.aliases = aliases
+        ctx.backend = backend
+        ctx.dtype = dtype
+        ctx.ranges = ranges
+        ctx.myconv = conv_module
+        ctx.rec_multVar_highdim = rec_multVar_highdim
+        ctx.device = device
 
         # relying on the 'ctx.saved_variables' attribute is necessary
         # if you want to be able to differentiate the output of the backward once again.

@@ -177,6 +177,7 @@ class InCoreFalkon(FalkonBase):
 
         with TicToc("Calcuating Preconditioner of size %d" % (self.M), debug=self.options.debug):
             precond = falkon.preconditioner.FalkonPreconditioner(self.penalty, self.kernel, self.options)
+            self.precond = precond
             precond.init(ny_points)
 
         # Cache must be emptied to ensure enough memory is visible to the optimizer

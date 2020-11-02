@@ -24,7 +24,7 @@ def run_exp(dataset: Dataset,
     Xtr, Ytr, Xts, Yts, metadata = get_load_fn(dataset)(np.float32, as_torch=True)
     err_fns = get_err_fns(dataset)
 
-    centers = metadata['centers']
+    centers = torch.from_numpy(metadata['centers']).cuda()
 
     # We use a validation split (redefinition of Xtr, Ytr).
     train_frac = 0.8
@@ -33,9 +33,16 @@ def run_exp(dataset: Dataset,
     Xtr, Ytr = Xtr[idx_tr], Ytr[idx_tr]
     print("Splitting data for validation and testing: Have %d train - %d validation samples" %
           (Xtr.shape[0], Xval.shape[0]))
-    data = {'Xtr': Xtr, 'Ytr': Ytr, 'Xval': Xval, 'Yval': Yval}
+    data = {'Xtr': Xtr.cuda(), 'Ytr': Ytr.cuda(), 'Xts': Xval.cuda(), 'Yts': Yval.cuda()}
 
     falkon_opt = FalkonOptions(use_cpu=False)
+
+    def cback(model):
+        train_pred = model.predict(data['Xtr'])
+        val_pred = model.predict(data['Xts'])
+        train_err, err = err_fns[0](data['Ytr'].cpu(), train_pred.cpu(), **metadata)
+        val_err, err = err_fns[0](data['Yts'].cpu(), val_pred.cpu(), **metadata)
+        print(f"Train {err}: {train_err:.5f} -- Val {err}: {val_err:.5f}")
 
     hps, val_loss, hgrads, best_model, times = run_falkon_hypergrad(
         data,
@@ -49,20 +56,21 @@ def run_exp(dataset: Dataset,
         outer_steps=outer_steps,
         hessian_cg_steps=hessian_cg_steps,
         hessian_cg_tol=hessian_cg_tol,
-        callback=None,
-        debug=True)
+        callback=cback,
+        debug=True,
+        )
 
     # Now we have the model, retrain with the full training data and test!
-    Xtr = torch.stack([Xtr, Xval], 0)
-    Ytr = torch.stack([Ytr, Yval], 0)
+    Xtr = torch.cat([Xtr, Xval], 0).cuda()
+    Ytr = torch.cat([Ytr, Yval], 0).cuda()
     best_model.fit(Xtr, Ytr)
-    train_pred = best_model.predict(Xtr)
-    test_pred = best_model.predict(Xts)
+    train_pred = best_model.predict(Xtr).cpu()
+    test_pred = best_model.predict(Xts.cuda()).cpu()
 
     print("Test (unseen) errors after retraining on the full train dataset")
     for efn in err_fns:
-        err, train_err = efn(Ytr, train_pred, metadata)
-        err, test_err = efn(Yts, test_pred, metadata)
+        train_err, err = efn(Ytr.cpu(), train_pred, **metadata)
+        test_err, err = efn(Yts.cpu(), test_pred, **metadata)
         print(f"Train {err}: {train_err:.5f} -- Test {err}: {test_err:.5f}")
 
 

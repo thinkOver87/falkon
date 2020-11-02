@@ -64,7 +64,10 @@ class FalkonHO(AbsHypergradModel):
         alpha = params['alpha']
         penalty, sigma = hparams['penalty'], hparams['sigma']
         kernel = DiffGaussianKernel(sigma, self.opt)
-        ny_points = self.flk.ny_points_  # Use saved value instead of from hparams to simplify code
+        if 'centers' in hparams:
+            ny_points = hparams['centers']
+        else:
+            ny_points = self.flk.ny_points_
         preds = kernel.mmv(self.Xts, ny_points, alpha)
         return torch.mean((preds - self.Yts) ** 2)
 
@@ -85,7 +88,10 @@ class FalkonHO(AbsHypergradModel):
         alpha = params['alpha']
         penalty, sigma = hparams['penalty'], hparams['sigma']
         N = self.Xtr.shape[0]
-        ny_points = self.flk.ny_points_  # Use saved value instead of from hparams to simplify code
+        if 'centers' in hparams:
+            ny_points = hparams['centers']
+        else:
+            ny_points = self.flk.ny_points_
 
         kernel = DiffGaussianKernel(sigma, self.opt)
 
@@ -172,14 +178,14 @@ def run_falkon_hypergrad(data,
 
     # Choose start value for sigma
     if sigma_type == 'single':
-        start_sigma = [1]
+        start_sigma = [2]
     elif sigma_type == 'diag':
-        start_sigma = [1] * d
+        start_sigma = [2] * d
     else:
         raise ValueError("sigma_type %s unrecognized" % (sigma_type))
 
     hparams = {
-        'penalty': torch.tensor(12, requires_grad=True, dtype=dt, device=dev),  # e^{-penalty}
+        'penalty': torch.tensor(1, requires_grad=True, dtype=dt, device=dev),  # e^{-penalty}
         'sigma': torch.tensor(start_sigma, requires_grad=True, dtype=dt, device=dev),
     }
     params = {
@@ -188,7 +194,7 @@ def run_falkon_hypergrad(data,
     }
     # Nystrom centers: Need to decide whether to optimize them as well
     if optimize_centers:
-        hparams['centers'] = falkon_centers.select(Xtr, Y=None, M=falkon_M)
+        hparams['centers'] = falkon_centers.select(Xtr, Y=None, M=falkon_M).requires_grad_()
 
     outer_opt = torch.optim.Adam(lr=outer_lr, params=hparams.values())
     flk_helper = FalkonHO(falkon_M, falkon_centers, falkon_maxiter, Xtr, Ytr, Xts, Yts, falkon_opt)

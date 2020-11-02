@@ -186,6 +186,7 @@ class Falkon(FalkonBase):
                 print("Preconditioner will run on %s" %
                       ("CPU" if pc_opt.use_cpu else ("%d GPUs" % self.num_gpus)))
             precond = falkon.preconditioner.FalkonPreconditioner(self.penalty, self.kernel, pc_opt)
+            self.precond = precond
             precond.init(ny_points)
 
         if _use_cuda_mmv:

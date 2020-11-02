@@ -751,19 +751,19 @@ class SmallHiggsDataset(BaseDataset):
 
     @staticmethod
     def read_centers(dtype):
-        with h5py.File(HiggsDataset.file_name, 'r') as h5py_file:
+        with h5py.File(SmallHiggsDataset.file_name, 'r') as h5py_file:
             centers = np.array(h5py_file['centers'], dtype=as_np_dtype(dtype))
         return centers
 
     @staticmethod
     def read_data(dtype):
-        with h5py.File(HiggsDataset.file_name, 'r') as h5py_file:
+        with h5py.File(SmallHiggsDataset.file_name, 'r') as h5py_file:
             X_train = np.array(h5py_file['X_train'], dtype=as_np_dtype(dtype))
             Y_train = np.array(h5py_file['Y_train'], dtype=as_np_dtype(dtype))
             X_test = np.array(h5py_file['X_test'], dtype=as_np_dtype(dtype))
             Y_test = np.array(h5py_file['Y_test'], dtype=as_np_dtype(dtype))
-        X = np.concatenate(X_train, X_test, axis=0)
-        Y = np.concatenate(Y_train, Y_test, axis=0)
+        X = np.concatenate([X_train, X_test], axis=0)
+        Y = np.concatenate([Y_train, Y_test], axis=0)
         return X, Y
 
     @staticmethod

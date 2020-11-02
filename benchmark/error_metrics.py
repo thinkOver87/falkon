@@ -242,6 +242,7 @@ ERROR_METRICS: Dict[Dataset, List[ERROR_FN_TYPE]] = {
     Dataset.TIMIT: [timit_calc_error],
     Dataset.MILLIONSONGS: [ms_calc_mse, ms_calc_relerr],
     Dataset.HIGGS: [higgs_calc_auc, binary_cerr],
+    Dataset.HOHIGGS: [binary_cerr, higgs_calc_auc],
     Dataset.TAXI: [rmse_with_std],
     Dataset.YELP: [rmse],
     Dataset.FLIGHTS: [mse],
