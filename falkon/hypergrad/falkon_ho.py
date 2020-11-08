@@ -1,6 +1,7 @@
 import dataclasses
 import time
 from typing import Union
+from enum import Enum
 
 import pandas as pd
 import numpy as np
@@ -14,6 +15,17 @@ from falkon.hypergrad.hypergrad import compute_hypergrad
 from falkon.optim import ConjugateGradient
 
 
+class ValidationLoss(Enum):
+    PenalizedMSE = "penalized-mse"
+    MSE = "mse"
+
+    def __str__(self):
+        return self.value
+
+    def __repr__(self):
+        return str(self)
+
+
 class FalkonHO(AbsHypergradModel):
     def __init__(self,
                  M,
@@ -23,7 +35,8 @@ class FalkonHO(AbsHypergradModel):
                  Ytr,
                  Xts,
                  Yts,
-                 opt):
+                 opt,
+                 loss: ValidationLoss):
         super().__init__()
         self.Xtr = Xtr
         self.Ytr = Ytr
@@ -36,6 +49,7 @@ class FalkonHO(AbsHypergradModel):
 
         self.center_selection = center_selection
         self.flk = None
+        self.loss = loss
 
     def inner_opt(self, params, hparams):
         """This is NOT DIFFERENTIABLE"""
@@ -63,7 +77,7 @@ class FalkonHO(AbsHypergradModel):
 
     def _val_loss_mse(self, params, hparams):
         alpha = params['alpha']
-        penalty, sigma = hparams['penalty'], hparams['sigma']
+        sigma = hparams['sigma']
         kernel = DiffGaussianKernel(sigma, self.opt)
         if 'centers' in hparams:
             ny_points = hparams['centers']
@@ -72,8 +86,24 @@ class FalkonHO(AbsHypergradModel):
         preds = kernel.mmv(self.Xts, ny_points, alpha)
         return torch.mean((preds - self.Yts) ** 2)
 
+    def _val_loss_penalized_mse(self, params, hparams):
+        alpha = params['alpha']
+        penalty, sigma = hparams['penalty'], hparams['sigma']
+        kernel = DiffGaussianKernel(sigma, self.opt)
+        if 'centers' in hparams:
+            ny_points = hparams['centers']
+        else:
+            ny_points = self.flk.ny_points_
+        preds = kernel.mmv(self.Xts, ny_points, alpha)
+        return torch.mean((preds - self.Yts) ** 2) + torch.exp(-penalty) * alpha.T @ kernel.mmv(ny_points, ny_points, alpha)
+
     def val_loss(self, params, hparams):
-        return self._val_loss_mse(params, hparams)
+        if self.loss == ValidationLoss.PenalizedMSE:
+            return self._val_loss_penalized_mse(params, hparams)
+        elif self.loss == ValidationLoss.MSE:
+            return self._val_loss_mse(params, hparams)
+        else:
+            raise RuntimeError("Loss %s unrecognized" % (self.loss))
 
     def val_loss_grads(self, params, hparams):
         o_loss = self.val_loss(params, hparams)
@@ -168,10 +198,15 @@ def map_gradient(data,
                  falkon_M: int,
                  falkon_maxiter,
                  falkon_opt,
-                 sigma_type: str):
+                 sigma_type: str,
+                 hessian_cg_steps: int,
+                 hessian_cg_tol: float,
+                 loss: ValidationLoss,
+                 err_fns: list):
     Xtr, Ytr, Xts, Yts = data['Xtr'], data['Ytr'], data['Xts'], data['Yts']
     t = Ytr.size(1)
     dt, dev = Xtr.dtype, Xtr.device
+    which_grads = "hyper_grads"  # Can also be 'val_grads'
 
     # Choose start value for sigma
     if sigma_type != 'single':
@@ -181,8 +216,8 @@ def map_gradient(data,
         'alpha': torch.zeros(falkon_M, t, requires_grad=True, dtype=dt, device=dev),
         'alpha_pc': torch.zeros(falkon_M, t, requires_grad=True, dtype=dt, device=dev),
     }
-    penalty_range = np.linspace(1, 20, num=40)
-    sigma_range = np.linspace(1, 20, num=40)
+    penalty_range = np.linspace(0.1, 20, num=60)
+    sigma_range = np.linspace(0.1, 20, num=60)
     hps = []
     for p in penalty_range:
         for s in sigma_range:
@@ -191,20 +226,37 @@ def map_gradient(data,
                 'sigma': torch.tensor([s], requires_grad=True, dtype=dt, device=dev),
             })
 
-    flk_helper = FalkonHO(falkon_M, falkon_centers, falkon_maxiter, Xtr, Ytr, Xts, Yts, falkon_opt)
+    flk_helper = FalkonHO(falkon_M, falkon_centers, falkon_maxiter, Xtr, Ytr, Xts, Yts, falkon_opt, loss)
 
     df = pd.DataFrame(columns=["sigma", "sigma_g", "penalty", "penalty_g", "loss"])
     for hp in hps:
         params = flk_helper.inner_opt(params, hp)
-        _, hp_grad = flk_helper.val_loss_grads(params, hp)
-        loss = flk_helper.val_loss(params, hp)
-        df.append({
+        if which_grads == 'hyper_grads':
+            loss, hp_grad = compute_hypergrad(
+                params, hp, model=flk_helper, cg_steps=hessian_cg_steps, cg_tol=hessian_cg_tol,
+                set_grad=False, timings=False)
+        elif which_grads == 'val_grads':
+            params['alpha'].requires_grad_()
+            params['alpha_pc'].requires_grad_()
+            _, hp_grad = flk_helper.val_loss_grads(params, hp)
+            loss = flk_helper.val_loss(params, hp)
+        else:
+            raise ValueError(which_grads)
+
+        new_row = {
             'penalty': hp['penalty'].cpu().item(),
-            'penalty_g': hp_grad[0][0].cpu().item(),
+            'penalty_g': hp_grad[0].cpu().item(),
             'sigma': hp['sigma'][0].cpu().item(),
             'sigma_g': hp_grad[1][0].cpu().item(),
             'loss': loss.cpu().item(),
-        })
+        }
+        ts_preds = flk_helper.flk.predict(Xts)
+        for efn in err_fns:
+            err, err_name = efn(Yts.cpu(), ts_preds.cpu())
+            new_row["test_%s" % err_name] = err
+
+        df = df.append(new_row, ignore_index=True)
+        print(hp)
     return df
 
 
@@ -220,7 +272,10 @@ def run_falkon_hypergrad(data,
                          hessian_cg_steps,
                          hessian_cg_tol,
                          callback,
-                         debug):
+                         debug,
+                         loss: ValidationLoss,
+                         sigma_init: float = 2,
+                         penalty_init: float = 1):
     Xtr, Ytr, Xts, Yts = data['Xtr'], data['Ytr'], data['Xts'], data['Yts']
 
     n, d = Xtr.size()
@@ -229,14 +284,14 @@ def run_falkon_hypergrad(data,
 
     # Choose start value for sigma
     if sigma_type == 'single':
-        start_sigma = [2]
+        start_sigma = [sigma_init]
     elif sigma_type == 'diag':
-        start_sigma = [2] * d
+        start_sigma = [sigma_init] * d
     else:
         raise ValueError("sigma_type %s unrecognized" % (sigma_type))
 
     hparams = {
-        'penalty': torch.tensor(1, requires_grad=True, dtype=dt, device=dev),  # e^{-penalty}
+        'penalty': torch.tensor(penalty_init, requires_grad=True, dtype=dt, device=dev),  # e^{-penalty}
         'sigma': torch.tensor(start_sigma, requires_grad=True, dtype=dt, device=dev),
     }
     params = {
@@ -248,7 +303,7 @@ def run_falkon_hypergrad(data,
         hparams['centers'] = falkon_centers.select(Xtr, Y=None, M=falkon_M).requires_grad_()
 
     outer_opt = torch.optim.Adam(lr=outer_lr, params=hparams.values())
-    flk_helper = FalkonHO(falkon_M, falkon_centers, falkon_maxiter, Xtr, Ytr, Xts, Yts, falkon_opt)
+    flk_helper = FalkonHO(falkon_M, falkon_centers, falkon_maxiter, Xtr, Ytr, Xts, Yts, falkon_opt, loss)
 
     hparam_history = [[h.detach().clone() for h in hparams.values()]]
     val_loss_history = []
