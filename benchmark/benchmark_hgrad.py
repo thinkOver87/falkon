@@ -1,5 +1,6 @@
 import argparse
 import datetime
+import functools
 
 import numpy as np
 import torch
@@ -17,7 +18,7 @@ from error_metrics import get_err_fns
 def run_gmap_exp(dataset: Dataset,
                  sigma_type: str,
                  inner_maxiter: int,
-                 hessian_cg_steps: float,
+                 hessian_cg_steps: int,
                  hessian_cg_tol: float,
                  loss: ValidationLoss):
     err_fns = get_err_fns(dataset)
@@ -55,6 +56,58 @@ def run_gmap_exp(dataset: Dataset,
     out_fn = f"./logs/gd_map_{dataset}_{int(datetime.datetime.timestamp(datetime.datetime.now()) * 1000)}.csv"
     print("Saving gradient map to %s" % (out_fn))
     df.to_csv(out_fn)
+
+
+def run_gpflow(dataset: Dataset,
+               num_iter: int,
+               lr: float,
+               sigma_type: str,
+               sigma_init: float,
+               opt_centers: bool
+               ):
+    batch_size = 128
+    import gpflow
+    from gpflow_model import TrainableSVGP
+    Xtr, Ytr, Xts, Yts, metadata = get_load_fn(dataset)(np.float32, as_torch=False, as_tf=True)
+    err_fns = get_err_fns(dataset)
+    err_fns = [functools.partial(fn, **metadata) for fn in err_fns]
+    centers = metadata['centers']
+
+    # We use a validation split (redefinition of Xtr, Ytr).
+    train_frac = 0.8
+    idx_tr, idx_val = equal_split(Xtr.shape[0], train_frac=train_frac)
+    Xval, Yval = Xtr[idx_val], Ytr[idx_val]
+    Xtr, Ytr = Xtr[idx_tr], Ytr[idx_tr]
+    print("Splitting data for validation and testing: Have %d train - %d validation samples" %
+          (Xtr.shape[0], Xval.shape[0]))
+
+    # Data are divided by `lengthscales`
+    # variance is multiplied outside of the exponential
+    if sigma_type == "single":
+        initial_sigma = sigma_init
+    elif sigma_type == "full":
+        initial_sigma = [sigma_init] * Xtr.shape[1]
+    else:
+        raise ValueError("Sigma type %s not recognized" % (sigma_type))
+    kernel_variance = 1.0
+    kernel = gpflow.kernels.SquaredExponential(lengthscales=initial_sigma, variance=kernel_variance)
+    gpflow.set_trainable(kernel.variance, False)
+    gpflow.set_trainable(kernel.lengthscales, True)
+
+    trainable_svgp = TrainableSVGP(kernel,
+                                   centers,
+                                   batch_size=batch_size,
+                                   num_iter=num_iter,
+                                   err_fn=err_fns[0],
+                                   var_dist="diag",
+                                   classif=None,
+                                   error_every=10,
+                                   train_hyperparams=True,
+                                   lr=lr,
+                                   natgrad_lr=0)
+    gpflow.set_trainable(trainable_svgp.model.inducing_variable.Z, opt_centers)
+
+    trainable_svgp.fit(Xtr, Ytr, Xval, Yval)
 
 
 def run_exp(dataset: Dataset,
@@ -164,6 +217,8 @@ if __name__ == "__main__":
                    help="Whether to optimize Nystrom centers")
     p.add_argument('--loss', type=ValidationLoss, choices=list(ValidationLoss), default=ValidationLoss.PenalizedMSE)
     p.add_argument('--map-gradient', action='store_true', help="Creates a gradient map")
+    p.add_argument('--gpflow', action='store_true', help="Run GPflow model")
+
 
     args = p.parse_args()
     print("-------------------------------------------")
@@ -174,14 +229,22 @@ if __name__ == "__main__":
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
-    if args.map_gradient:
+    if args.gpflow:
+        run_gpflow(dataset=args.dataset,
+                   num_iter=args.steps,
+                   lr=args.lr,
+                   sigma_type=args.sigma_type,
+                   sigma_init=args.sigma_init,
+                   opt_centers=args.optimize_centers
+                   )
+    elif args.map_gradient:
         run_gmap_exp(dataset=args.dataset,
                      sigma_type=args.sigma_type,
                      inner_maxiter=args.flk_steps,
                      hessian_cg_steps=args.hessian_cg_steps,
                      hessian_cg_tol=args.hessian_cg_tol,
                      loss=args.loss,
-                    )
+                     )
     else:
         run_exp(dataset=args.dataset,
                 inner_maxiter=args.flk_steps,
@@ -194,4 +257,4 @@ if __name__ == "__main__":
                 penalty_init=args.penalty_init,
                 opt_centers=args.optimize_centers,
                 loss=args.loss,
-               )
+                )

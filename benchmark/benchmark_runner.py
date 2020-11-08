@@ -442,55 +442,20 @@ def run_gpflow(dset: Dataset,
         )
         return model
 
-    if kfold == 1:
-        load_fn = get_load_fn(dset)
-        Xtr, Ytr, Xts, Yts, kwargs = load_fn(dtype=dtype.to_numpy_dtype(), as_torch=False, as_tf=True)
-        err_fns = [functools.partial(fn, **kwargs) for fn in err_fns]
-        model = get_model(Xtr, Ytr.shape[1], err_fns[0])
-        t_s = time.time()
-        print("Starting to train model %s on data %s" % (model, dset), flush=True)
-        model.fit(Xtr, Ytr, Xts, Yts)
-        print("Training of %s on %s complete in %.2fs" %
-            (algorithm, dset, time.time() - t_s), flush=True)
-        if model.num_classes == 2:
-            Yts = (Yts + 1) / 2
-            Ytr = (Ytr + 1) / 2
-        test_model(model, f"{algorithm} on {dset}", Xts, Yts, Xtr, Ytr, err_fns)
+    load_fn = get_load_fn(dset)
+    Xtr, Ytr, Xts, Yts, kwargs = load_fn(dtype=dtype.to_numpy_dtype(), as_torch=False, as_tf=True)
+    err_fns = [functools.partial(fn, **kwargs) for fn in err_fns]
+    model = get_model(Xtr, Ytr.shape[1], err_fns[0])
+    t_s = time.time()
+    print("Starting to train model %s on data %s" % (model, dset), flush=True)
+    model.fit(Xtr, Ytr, Xts, Yts)
+    print("Training of %s on %s complete in %.2fs" %
+        (algorithm, dset, time.time() - t_s), flush=True)
+    if model.num_classes == 2:
+        Yts = (Yts + 1) / 2
+        Ytr = (Ytr + 1) / 2
+    test_model(model, f"{algorithm} on {dset}", Xts, Yts, Xtr, Ytr, err_fns)
 
-        #if ind_pt_file is not None:
-        #    print("Inducing points: ", model.inducing_points[0])
-        #    np.save(ind_pt_file, model.inducing_points)
-        #    print("Saved inducing points to %s" % (ind_pt_file))
-    else:
-        print("Will train GPFlow on data %s with %d-fold CV" % (dset, kfold), flush=True)
-        load_fn = get_cv_fn(dset)
-        iteration = 0
-        test_errs, train_errs = [], []
-
-        for Xtr, Ytr, Xts, Yts, kwargs in load_fn(k=kfold, dtype=dtype.to_numpy_dtype(), as_torch=True):
-            err_fns = [functools.partial(fn, **kwargs) for fn in err_fns]
-            model = get_model(Xtr, Ytr.shape[1], err_fns[0])
-            t_s = time.time()
-            model.fit(Xtr, Ytr, Xts, Yts)
-            print("Training of %s on %s complete in %.2fs" %
-                (algorithm, dset, time.time() - t_s), flush=True)
-            iteration += 1
-            c_test_errs, c_train_errs = test_model(
-                model, f"{algorithm} on {dset}", Xts, Yts, Xtr, Ytr, err_fns)
-            train_errs.append(c_train_errs)
-            test_errs.append(c_test_errs)
-
-        print("Full errors: Test %s - Train %s" % (test_errs, train_errs))
-        print()
-        print("%d-Fold Error Report" % (kfold))
-        for err_fn_i in range(len(err_fns)):
-            print("Final test errors: %.4f +- %4f" % (
-                np.mean([e[err_fn_i] for e in test_errs]),
-                np.std([e[err_fn_i] for e in test_errs])))
-            print("Final train errors: %.4f +- %4f" % (
-                np.mean([e[err_fn_i] for e in train_errs]),
-                np.std([e[err_fn_i] for e in train_errs])))
-            print()
 
 
 if __name__ == "__main__":
