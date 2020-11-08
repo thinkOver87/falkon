@@ -27,6 +27,9 @@ def _choose_var_dist(dist_str, num_points, batch_shape=1):
     elif dist_str == "natgrad":
         return gpytorch.variational.NaturalVariationalDistribution(
             num_points, batch_shape=batch_shape)
+    elif dist_str == "tril_natgrad":
+        return gpytorch.variational.TrilNaturalVariationalDistribution(
+            num_points, batch_shape=batch_shape)
     else:
         raise KeyError(dist_str)
 
@@ -98,9 +101,9 @@ class GenericApproxGP(BaseModel):
                  var_distrib: str,
                  likelihood):
         distribution = _choose_var_dist(
-            var_distrib, inducing_points.size(-2), batch_shape=1)
+            var_distrib, inducing_points.size(-2), batch_shape=1).cuda()
         strategy = _choose_var_strat(
-            self, var_strat, distribution, inducing_points, learn_ind=learn_ind_pts, num_classes=None)
+            self, var_strat, distribution, inducing_points, learn_ind=learn_ind_pts, num_classes=None).cuda()
 
         super().__init__(strategy, likelihood)
 
@@ -128,10 +131,10 @@ class MultiTaskApproxGP(BaseModel):
                  likelihood,
                  batch_shape):
         distribution = _choose_var_dist(
-            var_distrib, inducing_points.size(-2), batch_shape)
+            var_distrib, inducing_points.size(-2), batch_shape).cuda()
         strategy = _choose_var_strat(
             self, var_strat, distribution, inducing_points,
-            learn_ind=learn_ind_pts, num_classes=batch_shape)
+            learn_ind=learn_ind_pts, num_classes=batch_shape).cuda()
 
         super().__init__(strategy, likelihood)
 
@@ -188,10 +191,11 @@ class GPTrainer():
     def do_train(self, Xtr, Ytr, Xval, Yval):
         # Define dataset iterators
         train_dataset = torch.utils.data.TensorDataset(Xtr, Ytr)
+        # Pinning memory of DataLoader results in slower training.
         if self.mb_size == 1:
-            train_loader = torch.utils.data.DataLoader(train_dataset, shuffle=True, num_workers=8)
+            train_loader = torch.utils.data.DataLoader(train_dataset, shuffle=True, num_workers=0)
         else:
-            train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=self.mb_size, shuffle=True, num_workers=8)
+            train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=self.mb_size, shuffle=True, num_workers=0)
 
         # Start training
         t_elapsed = 0
@@ -214,7 +218,7 @@ class GPTrainer():
                 if j % self.error_every == 0:
                     t_elapsed += time.time() - t_start
                     err, err_name = self.err_fn(y_batch.cpu(), self.model.likelihood(output).mean.detach().cpu())
-                    print('Epoch %d, iter %d/%d - Elapsed %.1fs - Loss: %.3f - %s: %.3f' %
+                    print('Epoch %d, iter %d/%d - Elapsed %.1fs - Loss: %.3f - %s: %.7f' %
                           (epoch + 1, j, len(train_loader), t_elapsed, loss.item(), err_name, err), flush=True)
                     t_start = time.time()
             t_elapsed += time.time() - t_start  # t_start will be reset at the start of the loop
@@ -293,11 +297,12 @@ class RegressionVGP(GPTrainer):
         lengthscale = [p for name, p in dict(ker.named_parameters()).items() if 'raw_lengthscale' in name]
         num_ker_params = lengthscale[0].shape #dict(ker.named_parameters())['raw_lengthscale'].shape
         var_dist_params = self.model.variational_strategy._variational_distribution._parameters
-        var_dist_num_params = sum([sum(p.shape) for p in var_dist_params.values()])
+        var_dist_num_params = sum([np.prod(p.shape) for p in var_dist_params.values()])
         return (f"RegressionVGP<num_inducing_points={num_ind_pt}, kernel={ker}, "
                 f"kernel_params={num_ker_params}, likelihood={self.model.likelihood}, "
-                f"variational_distribution={self.var_dist}, variational_params={var_dist_num_params}, "
-                f"mini-batch={self.mb_size}, lr={self.lr}>")
+                f"variational_distribution={self.var_dist}, strategy={self.model.strategy}, "
+                f"variational_params={var_dist_num_params}, "
+                f"mini-batch={self.mb_size}, lr={self.lr}, natgrad_lr={self.natgrad_lr}>")
 
 
 class TwoClassVGP(GPTrainer):
@@ -320,6 +325,11 @@ class TwoClassVGP(GPTrainer):
         mean_module = gpytorch.means.ConstantMean()
         # Only difference from regression is use of Bernoulli likelihood
         likelihood = gpytorch.likelihoods.BernoulliLikelihood()
+
+        if use_cuda:
+            inducing_points = inducing_points.contiguous().cuda()
+            mean_module = mean_module.cuda()
+            kernel = kernel.cuda()
 
         model = GenericApproxGP(inducing_points,
                                 mean_module=mean_module,
@@ -352,11 +362,12 @@ class TwoClassVGP(GPTrainer):
                 num_ker_params = pv.shape
                 continue
         var_dist_params = self.model.variational_strategy._variational_distribution._parameters
-        var_dist_num_params = sum([sum(p.shape) for p in var_dist_params.values()])
+        var_dist_num_params = sum([np.prod(p.shape) for p in var_dist_params.values()])
         return (f"TwoClassVGP<num_inducing_points={num_ind_pt}, kernel={ker}, "
                 f"kernel_params={num_ker_params}, likelihood={self.model.likelihood}, "
-                f"variational_distribution={self.var_dist}, variational_params={var_dist_num_params}, "
-                f"mini-batch={self.mb_size}, lr={self.lr}>")
+                f"variational_distribution={self.var_dist}, strategy={self.model.strategy}, "
+                f"variational_params={var_dist_num_params}, "
+                f"mini-batch={self.mb_size}, lr={self.lr}, natgrad_lr={self.natgrad_lr}>")
 
 
 class MultiClassVGP(GPTrainer):

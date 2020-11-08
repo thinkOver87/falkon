@@ -53,6 +53,7 @@ class TrainableSVGP():
         if self.do_classif:
             self.num_classes = int(classif)
         self.model = None
+        self.whiten = True
         self.var_dist = var_dist
 
     def fit(self, X, Y, Xval, Yval):
@@ -81,7 +82,7 @@ class TrainableSVGP():
                 Y = np.argmax(Y, 1).reshape((-1,1)).astype(int)
         else:
             num_latent = 1
-            likelihood = gpflow.likelihoods.Gaussian()
+            likelihood = gpflow.likelihoods.Gaussian(variance=0.1)
 
         self.model = SVGP(
             kernel=self.kernel,
@@ -89,7 +90,7 @@ class TrainableSVGP():
             inducing_variable=self.Z,
             num_data=N,
             num_latent_gps=num_latent,
-            whiten=False,
+            whiten=self.whiten,
             q_diag=q_diag)
         # Setup training
         if not self.train_hyperparams:
@@ -124,11 +125,16 @@ class TrainableSVGP():
 
         loss = self.model.training_loss_closure(train_iter)
         t_elapsed = 0
-        for step in range(self.num_iter):
-            t_s = time.time()
+
+        @tf.function
+        def step_fn():
             adam_opt.minimize(loss, var_list=self.model.trainable_variables)
             if self.natgrad_lr > 0:
                 natgrad_opt.minimize(loss, var_list=variational_params)
+
+        for step in range(self.num_iter):
+            t_s = time.time()
+            step_fn()
             t_elapsed += time.time() - t_s
             if step % 700 == 0:
                 print("Step %d -- Elapsed %.2fs" % (step, t_elapsed), flush=True)
@@ -166,9 +172,9 @@ class TrainableSVGP():
     def __str__(self):
         return (("TrainableSVGP<kernel=%s, num_inducing_points=%d, batch_size=%d, "
                  "num_iter=%d, lr=%f, natgrad_lr=%f, error_every=%d, train_hyperparams=%s, "
-                 "var_dist=%s, do_classif=%s, model=%s")
+                 "var_dist=%s, do_classif=%s, model=%s, whiten=%s>")
                 % (self.kernel, self.Z.shape[0], self.batch_size, self.num_iter, self.lr,
                    self.natgrad_lr, self.error_every, self.train_hyperparams,
-                   self.var_dist, self.do_classif, self.model))
+                   self.var_dist, self.do_classif, self.model, self.whiten))
 
 
