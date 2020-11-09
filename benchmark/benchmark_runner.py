@@ -7,6 +7,7 @@ from typing import Optional, List
 
 import numpy as np
 
+from gpytorch_sgpr import GpytorchSGPR
 from benchmark_utils import *
 from datasets import get_load_fn, get_cv_fn
 from error_metrics import get_err_fns, get_tf_err_fn
@@ -92,13 +93,14 @@ def run_epro(dset: Dataset,
         iteration = 0
         test_errs, train_errs = [], []
 
-        for Xtr, Ytr, Xts, Yts, kwargs in load_fn(k=kfold, dtype=dtype.to_numpy_dtype(), as_torch=False):
+        for Xtr, Ytr, Xts, Yts, kwargs in load_fn(k=kfold, dtype=dtype.to_numpy_dtype(),
+                                                  as_torch=False):
             err_fns = [functools.partial(fn, **kwargs) for fn in err_fns]
             tf_err_fn = functools.partial(tf_err_fn, **kwargs)
             tf_err_fn.__name__ = "tf_error"
             model = EigenPro(kernel, Xtr, n_label=Ytr.shape[1],
-                         mem_gb=mem_gb, n_subsample=n_subsample, q=q, bs=None,
-                         metric=tf_err_fn, seed=seed)
+                             mem_gb=mem_gb, n_subsample=n_subsample, q=q, bs=None,
+                             metric=tf_err_fn, seed=seed)
             print("Starting EPRO fit (fold %d)" % (iteration))
             model.fit(Xtr, Ytr, x_val=Xts, y_val=Yts, epochs=np.arange(num_iter - 1) + 1)
             iteration += 1
@@ -118,6 +120,60 @@ def run_epro(dset: Dataset,
                 np.mean([e[err_fn_i] for e in train_errs]),
                 np.std([e[err_fn_i] for e in train_errs])))
             print()
+
+
+def run_gpytorch_sgpr(dset: Dataset,
+                      algorithm: Algorithm,
+                      dtype: Optional[DataType],
+                      lr: float,
+                      num_iter: int,
+                      num_centers: int,
+                      learn_ind_pts: bool,
+                      seed: int,
+                      ):
+    import torch
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+
+    # Data types
+    if dtype is None:
+        dtype = DataType.float32
+    if dtype.to_numpy_dtype() != np.float32:
+        raise RuntimeError(f"{algorithm} can only run on single-precision floats.")
+    # Error metrics
+    err_fns = get_err_fns(dset)
+
+    # Load data
+    load_fn = get_load_fn(dset)
+    Xtr, Ytr, Xts, Yts, kwargs = load_fn(dtype=dtype.to_numpy_dtype(), as_torch=True)
+    if Ytr.shape[1] != 1:
+        raise NotImplementedError("GPyTorch SGPR only implemented for single-output problems.")
+    err_fns = [functools.partial(fn, **kwargs) for fn in err_fns]
+
+    # Extract inducing points at random
+    inducing_idx = np.random.choice(Xtr.shape[0], num_centers, replace=False)
+    inducing_points = Xtr[inducing_idx].reshape(num_centers, -1)
+
+    # Initialize model class
+    model = GpytorchSGPR(
+        inducing_points,
+        err_fns[0],
+        num_epochs=num_iter,
+        use_cuda=True,
+        lr=lr,
+        learn_ind_pts=learn_ind_pts)
+
+    # Initialize training
+    print("Starting to train model %s on data %s" % (model, dset), flush=True)
+    t_s = time.time()
+    model.do_train(Xtr, Ytr, Xts, Yts)
+    print("Training of %s on %s complete in %.2fs" %
+          (algorithm, dset, time.time() - t_s), flush=True)
+    # if isinstance(model, TwoClassVGP):
+    #     # Need Ys in range [0,1] for correct error calculation
+    #     Yts = (Yts + 1) / 2
+    #     Ytr = (Ytr + 1) / 2
+    test_model(model, f"{algorithm} on {dset}", Xts, Yts, Xtr, Ytr, err_fns)
 
 
 def run_gpytorch(dset: Dataset,
@@ -167,7 +223,6 @@ def run_gpytorch(dset: Dataset,
             #kernel.lengthscale = kernel_sigma
         else:
             kernel = gpytorch.kernels.ScaleKernel(gpytorch.kernels.RBFKernel(ard_num_dims=None, batch_shape=torch.Size([num_outputs])))
-            #kernel = gpytorch.kernels.keops.RBFKernel(ard_num_dims=None, batch_shape=torch.Size([num_outputs]))
         if algorithm == Algorithm.GPYTORCH_CLS:
             if num_outputs == 1:
                 # 2 classes
@@ -296,7 +351,8 @@ def run_falkon(dset: Dataset,
         iteration = 0
         test_errs, train_errs = [], []
 
-        for Xtr, Ytr, Xts, Yts, kwargs in load_fn(k=kfold, dtype=dtype.to_numpy_dtype(), as_torch=True):
+        for Xtr, Ytr, Xts, Yts, kwargs in load_fn(k=kfold, dtype=dtype.to_numpy_dtype(),
+                                                  as_torch=True):
             err_fns = [functools.partial(fn, **kwargs) for fn in err_fns]
             with TicToc("FALKON ALGORITHM (fold %d)" % (iteration)):
                 flk.error_every = err_fns[0]
@@ -376,6 +432,63 @@ def run_logistic_falkon(dset: Dataset,
     test_model(flk, f"{algorithm} on {dset}", Xts, Yts, Xtr, Ytr, err_fns)
 
 
+def run_sgpr_gpflow(dset: Dataset,
+                    algorithm: Algorithm,
+                    dtype: Optional[DataType],
+                    lr: float,
+                    num_iter: int,
+                    num_centers: int,
+                    kernel_sigma: float,
+                    learn_ind_pts: bool,
+                    kernel_variance: float,
+                    seed: int,
+                    ):
+    import tensorflow as tf
+    import gpflow
+    from gpflow_model import TrainableSGPR
+    tf.random.set_seed(seed)
+    np.random.seed(seed)
+
+    # Data types
+    if dtype is None:
+        dtype = DataType.float32
+    if dtype == DataType.float32:
+        gpflow.config.set_default_float(np.float32)
+
+    err_fns = get_err_fns(dset)
+
+    # Kernel
+    sigma_initial = np.array(kernel_sigma, dtype=dtype.to_numpy_dtype())
+    kernel = gpflow.kernels.SquaredExponential(lengthscales=sigma_initial, variance=kernel_variance)
+
+    # Data loading
+    load_fn = get_load_fn(dset)
+    Xtr, Ytr, Xts, Yts, kwargs = load_fn(dtype=dtype.to_numpy_dtype(), as_torch=False,
+                                         as_tf=True)
+    err_fns = [functools.partial(fn, **kwargs) for fn in err_fns]
+
+    # Inducing points
+    inducing_idx = np.random.choice(Xtr.shape[0], num_centers, replace=False)
+    inducing_points = Xtr[inducing_idx].reshape(num_centers, -1)
+    print("Took %d random inducing points" % (inducing_points.shape[0]))
+    if Ytr.shape[1] != 1:
+        raise NotImplementedError("SGPR GPFLOW only implemented for 1 output")
+
+    # Define model, train and test
+    model = TrainableSGPR(kernel=kernel,
+                          inducing_points=inducing_points,
+                          num_iter=num_iter,
+                          err_fn=err_fns[0],
+                          train_hyperparams=learn_ind_pts,
+                          lr=lr)
+    t_s = time.time()
+    print("Starting to train model %s on data %s" % (model, dset), flush=True)
+    model.fit(Xtr, Ytr, Xts, Yts)
+    print("Training of %s on %s complete in %.2fs" %
+          (algorithm, dset, time.time() - t_s), flush=True)
+    test_model(model, f"{algorithm} on {dset}", Xts, Yts, Xtr, Ytr, err_fns)
+
+
 def run_gpflow(dset: Dataset,
                algorithm: Algorithm,
                dtype: Optional[DataType],
@@ -392,7 +505,7 @@ def run_gpflow(dset: Dataset,
                kfold: int,
                seed: int,
                ind_pt_file: Optional[str] = None,
-            ):
+               ):
     import tensorflow as tf
     import gpflow
     from gpflow_model import TrainableSVGP
@@ -457,9 +570,9 @@ def run_gpflow(dset: Dataset,
     test_model(model, f"{algorithm} on {dset}", Xts, Yts, Xtr, Ytr, err_fns)
 
 
-
 if __name__ == "__main__":
     import datetime
+
     print("-------------------------------------------")
     print(print(datetime.datetime.now()))
     p = argparse.ArgumentParser(description="FALKON Benchmark Runner")
@@ -482,23 +595,24 @@ if __name__ == "__main__":
     p.add_argument('-k', '--kfold', type=int, default=1,
                    help='Number of folds for k-fold CV.')
     p.add_argument('--seed', type=int, default=RANDOM_SEED,
-                    help='Random number generator seed')
+                   help='Random number generator seed')
     # Algorithm-specific arguments
     p.add_argument('-M', '--num-centers', type=int, default=0,
-                        help='Number of Nystroem centers. Used for algorithms '
-                              'falkon, gpytorch and gpflow.')
+                   help='Number of Nystroem centers. Used for algorithms '
+                        'falkon, gpytorch and gpflow.')
 
-    p.add_argument('--natgrad-lr', type=float, default=0.0001, help="Natural gradient learning rate (GPFlow)")
+    p.add_argument('--natgrad-lr', type=float, default=0.0001,
+                   help="Natural gradient learning rate (GPFlow)")
 
     p.add_argument('--var-dist', type=VariationalDistribution, default=None, required=False,
-                        help='Form of the variational distribution used in GPytorch')
+                   help='Form of the variational distribution used in GPytorch')
     p.add_argument('--learn-hyperparams', action='store_true',
                    help='Whether gpytorch should learn hyperparameters')
     p.add_argument('--inducing-point-file', type=str, default=None, required=False,
                    help='file with saved inducing points')
 
     p.add_argument('--penalty', type=float, default=0.0, required=False,
-                        help='Lambda penalty for use in KRR. Needed for the Falkon algorithm.')
+                   help='Lambda penalty for use in KRR. Needed for the Falkon algorithm.')
     p.add_argument('--sigma', type=float, default=-1.0, required=False,
                    help='Inverse length-scale for the Gaussian kernel.')
     p.add_argument('--batch-size', type=int, default=4096, required=False,
@@ -551,11 +665,20 @@ if __name__ == "__main__":
                      seed=args.seed, natgrad_lr=args.natgrad_lr)
     elif args.algorithm in {Algorithm.GPFLOW_CLS, Algorithm.GPFLOW_REG}:
         run_gpflow(dset=args.dataset, algorithm=args.algorithm, dtype=args.dtype,
-                     num_iter=args.epochs, num_centers=args.num_centers,
-                     kernel_sigma=args.sigma, var_dist=str(args.var_dist),
-                     batch_size=args.batch_size, lr=args.lr, natgrad_lr=args.natgrad_lr,
-                     learn_ind_pts=args.learn_hyperparams, ind_pt_file=args.inducing_point_file,
-                     error_every=args.error_every, kernel_variance=args.kernel_variance,
-                     kfold=args.kfold, seed=args.seed)
+                   num_iter=args.epochs, num_centers=args.num_centers,
+                   kernel_sigma=args.sigma, var_dist=str(args.var_dist),
+                   batch_size=args.batch_size, lr=args.lr, natgrad_lr=args.natgrad_lr,
+                   learn_ind_pts=args.learn_hyperparams, ind_pt_file=args.inducing_point_file,
+                   error_every=args.error_every, kernel_variance=args.kernel_variance,
+                   kfold=args.kfold, seed=args.seed)
+    elif args.algorithm == Algorithm.GPYTORCH_SGPR:
+        run_gpytorch_sgpr(dset=args.dataset, algorithm=args.algorithm, dtype=args.dtype,
+                          lr=args.lr, num_iter=args.epochs, num_centers=args.num_centers,
+                          learn_ind_pts=args.learn_hyperparams, seed=args.seed)
+    elif args.algorithm == Algorithm.GPFLOW_SGPR:
+        run_sgpr_gpflow(dset=args.dataset, algorithm=args.algorithm, dtype=args.dtype,
+                        lr=args.lr, num_iter=args.epochs, num_centers=args.num_centers,
+                        kernel_sigma=args.sigma, learn_ind_pts=args.learn_hyperparams,
+                        kernel_variance=args.kernel_variance, seed=args.seed)
     else:
         raise NotImplementedError(f"No benchmark implemented for algorithm {args.algorithm}.")
