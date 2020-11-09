@@ -3,12 +3,7 @@ import datetime
 import functools
 
 import numpy as np
-import torch
 import pandas as pd
-
-from falkon import FalkonOptions
-from falkon.center_selection import FixedSelector
-from falkon.hypergrad.falkon_ho import run_falkon_hypergrad, map_gradient, ValidationLoss
 
 from datasets import get_load_fn, equal_split
 from benchmark_utils import *
@@ -20,7 +15,15 @@ def run_gmap_exp(dataset: Dataset,
                  inner_maxiter: int,
                  hessian_cg_steps: int,
                  hessian_cg_tol: float,
-                 loss: ValidationLoss):
+                 loss: str,
+                 seed: int):
+    import torch
+    torch.manual_seed(seed)
+    from falkon import FalkonOptions
+    from falkon.center_selection import FixedSelector
+    from falkon.hypergrad.falkon_ho import run_falkon_hypergrad, map_gradient, ValidationLoss
+
+    loss = ValidationLoss(loss)
     err_fns = get_err_fns(dataset)
     Xtr, Ytr, Xts, Yts, metadata = get_load_fn(dataset)(np.float32, as_torch=True)
     centers = torch.from_numpy(metadata['centers']).cuda()
@@ -63,15 +66,18 @@ def run_gpflow(dataset: Dataset,
                lr: float,
                sigma_type: str,
                sigma_init: float,
-               opt_centers: bool
+               opt_centers: bool,
+               seed: int,
                ):
-    batch_size = 128
+    batch_size = 1280
+    dt = np.float64
     import gpflow
+    gpflow.config.set_default_float(dt)
     from gpflow_model import TrainableSVGP
-    Xtr, Ytr, Xts, Yts, metadata = get_load_fn(dataset)(np.float32, as_torch=False, as_tf=True)
+    Xtr, Ytr, Xts, Yts, metadata = get_load_fn(dataset)(dt, as_torch=False, as_tf=True)
     err_fns = get_err_fns(dataset)
     err_fns = [functools.partial(fn, **metadata) for fn in err_fns]
-    centers = metadata['centers']
+    centers = metadata['centers'].astype(dt)
 
     # We use a validation split (redefinition of Xtr, Ytr).
     train_frac = 0.8
@@ -84,9 +90,9 @@ def run_gpflow(dataset: Dataset,
     # Data are divided by `lengthscales`
     # variance is multiplied outside of the exponential
     if sigma_type == "single":
-        initial_sigma = sigma_init
+        initial_sigma = np.array([sigma_init], dtype=dt)
     elif sigma_type == "full":
-        initial_sigma = [sigma_init] * Xtr.shape[1]
+        initial_sigma = np.array([sigma_init] * Xtr.shape[1], dtype=dt)
     else:
         raise ValueError("Sigma type %s not recognized" % (sigma_type))
     kernel_variance = 1.0
@@ -103,10 +109,9 @@ def run_gpflow(dataset: Dataset,
                                    classif=None,
                                    error_every=10,
                                    train_hyperparams=True,
+                                   optimize_centers=False,
                                    lr=lr,
                                    natgrad_lr=0)
-    gpflow.set_trainable(trainable_svgp.model.inducing_variable.Z, opt_centers)
-
     trainable_svgp.fit(Xtr, Ytr, Xval, Yval)
 
 
@@ -120,7 +125,15 @@ def run_exp(dataset: Dataset,
             sigma_init: float,
             penalty_init: float,
             opt_centers: bool,
-            loss: ValidationLoss):
+            loss: str,
+            seed: int):
+    import torch
+    torch.manual_seed(seed)
+    from falkon import FalkonOptions
+    from falkon.center_selection import FixedSelector
+    from falkon.hypergrad.falkon_ho import run_falkon_hypergrad, map_gradient, ValidationLoss
+    loss = ValidationLoss(loss)
+
     Xtr, Ytr, Xts, Yts, metadata = get_load_fn(dataset)(np.float32, as_torch=True)
     err_fns = get_err_fns(dataset)
 
@@ -215,7 +228,7 @@ if __name__ == "__main__":
     p.add_argument('--penalty-init', type=float, default=1.0, help="Starting value for penalty")
     p.add_argument('--optimize-centers', action='store_true',
                    help="Whether to optimize Nystrom centers")
-    p.add_argument('--loss', type=ValidationLoss, choices=list(ValidationLoss), default=ValidationLoss.PenalizedMSE)
+    p.add_argument('--loss', type=str, default="penalized-mse")
     p.add_argument('--map-gradient', action='store_true', help="Creates a gradient map")
     p.add_argument('--gpflow', action='store_true', help="Run GPflow model")
 
@@ -226,7 +239,6 @@ if __name__ == "__main__":
     print("############### SEED: %d ################" % (args.seed))
     print("-------------------------------------------")
 
-    torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
     if args.gpflow:
@@ -235,7 +247,8 @@ if __name__ == "__main__":
                    lr=args.lr,
                    sigma_type=args.sigma_type,
                    sigma_init=args.sigma_init,
-                   opt_centers=args.optimize_centers
+                   opt_centers=args.optimize_centers,
+                   seed=args.seed,
                    )
     elif args.map_gradient:
         run_gmap_exp(dataset=args.dataset,
@@ -244,6 +257,7 @@ if __name__ == "__main__":
                      hessian_cg_steps=args.hessian_cg_steps,
                      hessian_cg_tol=args.hessian_cg_tol,
                      loss=args.loss,
+                     seed=args.seed,
                      )
     else:
         run_exp(dataset=args.dataset,
@@ -257,4 +271,5 @@ if __name__ == "__main__":
                 penalty_init=args.penalty_init,
                 opt_centers=args.optimize_centers,
                 loss=args.loss,
+                seed=args.seed
                 )

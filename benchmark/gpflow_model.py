@@ -37,9 +37,11 @@ class TrainableSVGP():
                  classif=None,
                  error_every=100,
                  train_hyperparams: bool = True,
+                 optimize_centers: bool = True,
                  lr: float = 0.001,
                  natgrad_lr: float = 0.01):
         self.train_hyperparams = train_hyperparams
+        self.optimize_centers = optimize_centers
         self.lr = lr
         self.natgrad_lr = natgrad_lr
         self.kernel = kernel
@@ -93,6 +95,7 @@ class TrainableSVGP():
             whiten=self.whiten,
             q_diag=q_diag)
         # Setup training
+        set_trainable(self.model.inducing_variable.Z, self.optimize_centers)
         if not self.train_hyperparams:
             set_trainable(self.model.inducing_variable.Z, False)
             set_trainable(self.kernel.lengthscales, False)
@@ -115,8 +118,12 @@ class TrainableSVGP():
             Y = (Y + 1) / 2
             Yval = (Yval + 1) / 2
         generator = partial(data_generator, X, Y)
+        if X.dtype == np.float32:
+            tf_dt = tf.float32
+        else:
+            tf_dt = tf.float64
         #train_dataset = tf.data.Dataset.from_tensor_slices((X, Y)) \
-        train_dataset = tf.data.Dataset.from_generator(generator, args=(self.batch_size, ), output_types=(tf.float32, tf.float32)) \
+        train_dataset = tf.data.Dataset.from_generator(generator, args=(self.batch_size, ), output_types=(tf_dt, tf_dt)) \
             .prefetch(self.batch_size * 10) \
             .repeat() \
             .shuffle(min(N // self.batch_size, 1_000_000 // self.batch_size)) \
