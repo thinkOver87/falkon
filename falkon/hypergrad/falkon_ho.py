@@ -7,6 +7,7 @@ import pandas as pd
 import numpy as np
 import torch
 from torch.distributions import transforms
+from torch.utils.data import DataLoader, TensorDataset
 
 import falkon
 from falkon.center_selection import UniformSelector, FixedSelector, CenterSelector
@@ -343,6 +344,101 @@ def run_falkon_hypergrad(data,
         hparam_history.append([h.detach().clone() for h in hparams.values()])
         val_loss_history.append(hgrad_out[0])
         hgrad_history.append([g.detach() for g in hgrad_out[1]])
+        time_history.append(i_end - i_start)
+
+    return hparam_history, val_loss_history, hgrad_history, flk_helper.model, time_history
+
+
+def stochastic_flk_hypergrad(
+                         data,
+                         falkon_centers: CenterSelector,
+                         falkon_M: int,
+                         falkon_maxiter: int,
+                         falkon_opt,
+                         sigma_type: str,
+                         outer_lr: float,
+                         batch_size: int,
+                         outer_steps: int,
+                         hessian_cg_steps: int,
+                         hessian_cg_tol: float,
+                         callback,
+                         debug: bool,
+                         loss: ValidationLoss,
+                         sigma_init: float = 2,
+                         penalty_init: float = 1):
+    Xtr, Ytr, Xts, Yts = data['Xtr'], data['Ytr'], data['Xts'], data['Yts']
+
+    if batch_size < falkon_M:
+        raise ValueError("Batch-size must be at least as large as the number of Falkon centers.")
+
+    n, d = Xtr.size()
+    t = Ytr.size(1)
+    dt, dev = Xtr.dtype, Xtr.device
+
+    # Choose start value for sigma
+    if sigma_type == 'single':
+        start_sigma = [sigma_init]
+    elif sigma_type == 'diag':
+        start_sigma = [sigma_init] * d
+    else:
+        raise ValueError("sigma_type %s unrecognized" % (sigma_type))
+
+    hparams = {
+        'penalty': torch.tensor(penalty_init, requires_grad=True, dtype=dt, device=dev),  # e^{-penalty}
+        'sigma': torch.tensor(start_sigma, requires_grad=True, dtype=dt, device=dev),
+    }
+    params = {
+        'alpha': torch.zeros(falkon_M, t, requires_grad=True, dtype=dt, device=dev),
+        'alpha_pc': torch.zeros(falkon_M, t, requires_grad=True, dtype=dt, device=dev),
+    }
+    # Nystrom centers: Need to decide whether to optimize them as well
+    hparams['centers'] = falkon_centers.select(Xtr, Y=None, M=falkon_M).requires_grad_()
+
+    outer_opt = torch.optim.Adam(lr=outer_lr, params=hparams.values())
+    hparam_history = [[h.detach().clone() for h in hparams.values()]]
+    val_loss_history = []
+    hgrad_history = []
+    time_history = []
+
+    trainset = TensorDataset(Xtr, Ytr)
+    train_loader = DataLoader(trainset, batch_size=batch_size, shuffle=True, num_workers=0,
+                              pin_memory=True, drop_last=True)
+    testset = TensorDataset(Xts, Yts)
+    test_loader = DataLoader(testset, batch_size=batch_size, shuffle=True, num_workers=0,
+                             pin_memory=True)
+
+    for o_step in range(outer_steps):
+        i_start = time.time()
+        b_tr_x, b_tr_y = next(iter(train_loader))
+        b_ts_x, b_ts_y = next(iter(test_loader))
+        flk_helper = FalkonHO(
+            falkon_M, falkon_centers, falkon_maxiter, b_tr_x, b_tr_y, b_ts_x, b_ts_y, falkon_opt, loss)
+
+        params = flk_helper.inner_opt(params, hparams)
+        if debug:
+            if callback is not None:
+                callback(flk_helper.model)
+            print()
+        inner_opt_t = time.time()
+
+        # Start 'outer_opt'
+        outer_opt.zero_grad()
+        hgrad_out = compute_hypergrad(params, hparams, model=flk_helper, cg_steps=hessian_cg_steps,
+                                      cg_tol=hessian_cg_tol, set_grad=True, timings=debug)
+        outer_opt.step()
+        hparams['penalty'].data.clamp_(min=1e-10)
+        hparams['sigma'].data.clamp_(min=1e-10)
+        i_end = time.time()
+
+        if debug:
+            print("[%4d/%4d] - time %.2fs (inner-opt %.2fs, outer-opt %.2fs)" % (o_step, outer_steps, i_end - i_start, inner_opt_t - i_start, i_end - inner_opt_t))
+            #print("GRADIENT", hgrad_out[1])
+            print("NEW HPARAMS", hparams)
+            print("NEW VAL LOSS", hgrad_out[0])
+
+        hparam_history.append([h.detach().clone().cpu() for h in hparams.values()])
+        val_loss_history.append(hgrad_out[0])
+        hgrad_history.append([g.detach().cpu() for g in hgrad_out[1]])
         time_history.append(i_end - i_start)
 
     return hparam_history, val_loss_history, hgrad_history, flk_helper.model, time_history

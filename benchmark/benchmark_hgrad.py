@@ -171,13 +171,15 @@ def run_exp(dataset: Dataset,
             seed: int):
     cuda = False
     train_frac = 0.8
+    sgd = True
+    batch_size = 30_000
 
     import torch
     torch.manual_seed(seed)
     np.random.seed(seed)
     from falkon import FalkonOptions
     from falkon.center_selection import FixedSelector, UniformSelector
-    from falkon.hypergrad.falkon_ho import run_falkon_hypergrad, ValidationLoss
+    from falkon.hypergrad.falkon_ho import run_falkon_hypergrad, ValidationLoss, stochastic_flk_hypergrad
     loss = ValidationLoss(loss)
 
     Xtr, Ytr, Xts, Yts, metadata = get_load_fn(dataset)(np.float32, as_torch=True)
@@ -213,24 +215,44 @@ def run_exp(dataset: Dataset,
         val_err, err = err_fns[0](data['Yts'].cpu(), val_pred.cpu(), **metadata)
         print(f"Train {err}: {train_err:.5f} -- Val {err}: {val_err:.5f}")
 
-    hps, val_loss, hgrads, best_model, times = run_falkon_hypergrad(
-        data,
-        sigma_type=sigma_type,
-        sigma_init=sigma_init,
-        penalty_init=penalty_init,
-        falkon_M=centers.shape[0],
-        falkon_centers=FixedSelector(centers),
-        optimize_centers=opt_centers,
-        falkon_maxiter=inner_maxiter,
-        falkon_opt=falkon_opt,
-        outer_lr=outer_lr,
-        outer_steps=outer_steps,
-        hessian_cg_steps=hessian_cg_steps,
-        hessian_cg_tol=hessian_cg_tol,
-        callback=cback,
-        debug=True,
-        loss=loss,
-    )
+    if sgd:
+        hps, val_loss, hgrads, best_model, times = stochastic_flk_hypergrad(
+            data,
+            sigma_type=sigma_type,
+            sigma_init=sigma_init,
+            penalty_init=penalty_init,
+            falkon_M=centers.shape[0],
+            falkon_centers=FixedSelector(centers),
+            falkon_maxiter=inner_maxiter,
+            falkon_opt=falkon_opt,
+            outer_lr=outer_lr,
+            outer_steps=outer_steps,
+            hessian_cg_steps=hessian_cg_steps,
+            hessian_cg_tol=hessian_cg_tol,
+            callback=cback,
+            debug=True,
+            loss=loss,
+            batch_size=batch_size,
+        )
+    else:
+        hps, val_loss, hgrads, best_model, times = run_falkon_hypergrad(
+            data,
+            sigma_type=sigma_type,
+            sigma_init=sigma_init,
+            penalty_init=penalty_init,
+            falkon_M=centers.shape[0],
+            falkon_centers=FixedSelector(centers),
+            optimize_centers=opt_centers,
+            falkon_maxiter=inner_maxiter,
+            falkon_opt=falkon_opt,
+            outer_lr=outer_lr,
+            outer_steps=outer_steps,
+            hessian_cg_steps=hessian_cg_steps,
+            hessian_cg_tol=hessian_cg_tol,
+            callback=cback,
+            debug=True,
+            loss=loss,
+        )
 
     # Now we have the model, retrain with the full training data and test!
     print("Retraining on the full train dataset.")
