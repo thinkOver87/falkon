@@ -1,4 +1,6 @@
 import time
+import tensorflow_probability as tfp
+import pandas as pd
 from functools import partial
 import numpy as np
 import gpflow
@@ -26,6 +28,64 @@ def data_generator(X, Y, batch_size):
         bstart = bend
 
 
+class TrainableGPR():
+    def __init__(self,
+                 kernel,
+                 num_iter,
+                 err_fn,
+                 lr):
+        self.kernel = kernel
+        self.num_iter = num_iter
+        self.err_fn = err_fn
+        self.lr = lr
+        self.model = None
+
+    def fit(self, X, Y, Xval, Yval):
+        self.model = gpflow.models.GPR(
+                (X, Y),
+                kernel=self.kernel,
+                noise_variance=0.1)
+        # Create the optimizers
+        adam_opt = tf.optimizers.Adam(self.lr)
+
+        gpflow.utilities.print_summary(self.model)
+        print("", flush=True)
+
+        @tf.function
+        def step_fn():
+            adam_opt.minimize(self.model.training_loss, var_list=self.model.trainable_variables)
+            return True
+
+        @tf.function
+        def pred_fn():
+            return self.model.predict_y(Xval)[0]
+
+        t_elapsed = 0
+        for step in range(self.num_iter):
+            t_s = time.time()
+            outcome = step_fn()
+            outcome = int(outcome) + 1
+            t_elapsed += time.time() - t_s
+            if (step + 1) % 1 == 0:
+                val_err, err_name = self.err_fn(Yval, pred_fn())
+                print(f"Epoch {step + 1} - {t_elapsed:7.2f}s elapsed - "
+                      f"validation {err_name} {val_err:7.5f}", flush=True)
+                print(f"\tLengthscale: {self.kernel.lengthscales}")
+
+        print("Final model is ")
+        gpflow.utilities.print_summary(self.model)
+        print("", flush=True)
+        return self
+
+    def predict(self, X, pred_fn=None):
+        return self.model.predict_y(X)[0]
+
+    def __str__(self):
+        return (("TrainableGPR<kernel=%s, "
+                 "num_iter=%d, lr=%f, model=%s>")
+                % (self.kernel, self.num_iter, self.lr, self.model))
+
+
 class TrainableSGPR():
     def __init__(self,
                  kernel,
@@ -41,39 +101,104 @@ class TrainableSGPR():
         self.num_iter = num_iter
         self.err_fn = err_fn
         self.model = None
+        self.optimizer = 'adam'
 
     def fit(self, X, Y, Xval, Yval):
+        # Only Gaussian likelihood allowed
         self.model = gpflow.models.SGPR(
             (X, Y),
             kernel=self.kernel,
-            inducing_variable=self.Z)
+            inducing_variable=self.Z,
+            noise_variance=0.1)
+        self.model.likelihood.variance = gpflow.Parameter(1, transform=tfp.bijectors.Identity())
 
         # Setup training parameters
         if not self.train_hyperparams:
             set_trainable(self.model.inducing_variable.Z, False)
 
-        # Create the optimizers
-        adam_opt = tf.optimizers.Adam(self.lr)
-
         gpflow.utilities.print_summary(self.model)
         print("", flush=True)
 
-        t_elapsed = 0
-        for step in range(self.num_iter):
-            t_s = time.time()
-            adam_opt.minimize(self.model.training_loss, var_list=self.model.trainable_variables)
-            t_elapsed += time.time() - t_s
-            val_err, err_name = self.err_fn(Yval, self.predict(Xval))
-            print(f"Epoch {step + 1} - {t_elapsed:7.2f}s elapsed - "
-                  f"validation {err_name} {val_err:7.5f}", flush=True)
+        @tf.function
+        def grad_fn():
+            grads = tf.gradients(self.model.training_loss(), self.model.trainable_variables)
+            return grads
+
+        if self.optimizer == 'scipy':
+            opt = gpflow.optimizers.Scipy()
+            def scipy_callback(step, variables, value):
+                print("Step %d - Variables: %s" % (step, value))
+            opt.minimize(self.model.training_loss, self.model.trainable_variables, method='L-BFGS-B',options=dict(maxiter=self.num_iter, ftol=1e-32,maxcor=3, gtol=1e-16, disp=False),
+                         step_callback=scipy_callback, compile=True)
+        else:
+            if self.optimizer == 'adam':
+                opt = tf.optimizers.Adam(self.lr)
+            elif self.optimizer == 'sgd':
+                opt = tf.optimizers.SGD(self.lr)
+            else:
+                raise ValueError("Optimizer %s unknown" % (self.optimizer))
+            @tf.function
+            def step_fn():
+                opt.minimize(self.model.training_loss, var_list=self.model.trainable_variables)
+            t_elapsed = 0
+            for step in range(self.num_iter):
+                t_s = time.time()
+                step_fn()
+                t_elapsed += time.time() - t_s
+                val_err, err_name = self.err_fn(Yval, self.predict(Xval))
+                print(f"Epoch {step + 1} - {t_elapsed:7.2f}s elapsed - "
+                      f"validation {err_name} {val_err:7.5f}", flush=True)
+                #print("loss: %7.3f - sigma: %7.2f - variance: %7.2f" % (self.model.training_loss(), self.model.kernel.lengthscales.numpy(), self.model.likelihood.variance.numpy()))
 
         print("Final model is ")
         gpflow.utilities.print_summary(self.model)
         print("", flush=True)
         return self
 
+    def gradient_map(self, X, Y, Xval, Yval, variance_list, lengthscale_list):
+        self.model = gpflow.models.SGPR(
+            (X, Y),
+            kernel=self.kernel,
+            inducing_variable=self.Z,
+            noise_variance=0.1)
+        # Setup parameters for which to compute gradient. We want only 2 params!
+        set_trainable(self.model.inducing_variable.Z, False)
+        set_trainable(self.model.kernel.variance, False)
+        set_trainable(self.model.kernel.lengthscales, True)
+        set_trainable(self.model.likelihood.variance, True)
+
+        @tf.function
+        def grad_fn():
+            grads = tf.gradients(self.model.training_loss(), self.model.trainable_variables)
+            return grads
+
+        df = pd.DataFrame(columns=["sigma", "sigma_g", "variance", "variance_g", "elbo"])
+        for lscale in lengthscale_list:
+            self.model.kernel.lengthscales.assign([lscale])
+            for var in variance_list:
+                self.model.likelihood.variance.assign(var)
+                #self.model.kernel.variance.assign([var])
+                grads = [g.numpy() for g in grad_fn()]
+                train_preds = self.model.predict_y(X)[0]
+                test_preds = self.model.predict_y(Xval)[0]
+                new_row = {
+                    'sigma': lscale,
+                    'sigma_g': grads[0][0],
+                    'variance': var,
+                    'variance_g': grads[1],
+                    'elbo': self.model.elbo().numpy(),
+                }
+                print("ELBO: %10.3f -- TRAINING LOSS: %10.3f" % (new_row['elbo'], self.model.training_loss()))
+                tr_err, tr_err_name = self.err_fn(Y, train_preds)
+                ts_err, ts_err_name = self.err_fn(Yval, test_preds)
+                new_row["train_%s" % tr_err_name] = tr_err
+                new_row["test_%s" % ts_err_name] = ts_err
+                df = df.append(new_row, ignore_index=True)
+                print(new_row)
+        return df
+
     def predict(self, X):
-        return self.model.predict_y(X)
+        return self.model.predict_y(X)[0]
 
     @property
     def inducing_points(self):
@@ -158,6 +283,7 @@ class TrainableSVGP():
         set_trainable(self.model.inducing_variable.Z, self.optimize_centers)
         if not self.train_hyperparams:
             set_trainable(self.model.inducing_variable.Z, False)
+            set_trainable(self.model.likelihood.variance, False)
             set_trainable(self.kernel.lengthscales, False)
             set_trainable(self.kernel.variance, False)
         if self.natgrad_lr > 0:
@@ -198,10 +324,12 @@ class TrainableSVGP():
             adam_opt.minimize(loss, var_list=self.model.trainable_variables)
             if self.natgrad_lr > 0:
                 natgrad_opt.minimize(loss, var_list=variational_params)
+            return True
 
         for step in range(self.num_iter):
             t_s = time.time()
-            step_fn()
+            outcome = step_fn()
+            outcome = int(outcome) + 1
             t_elapsed += time.time() - t_s
             if step % 700 == 0:
                 print("Step %d -- Elapsed %.2fs" % (step, t_elapsed), flush=True)
@@ -231,6 +359,76 @@ class TrainableSVGP():
             preds.append(batch_preds)
         preds = np.concatenate(preds, axis=0)
         return preds
+
+    def gradient_map(self, X, Y, Xval, Yval, variance_list, lengthscale_list):
+        N = X.shape[0]
+        likelihood = gpflow.likelihoods.Gaussian(variance=0.1)
+        self.model = SVGP(
+            kernel=self.kernel,
+            likelihood=likelihood,
+            inducing_variable=self.Z,
+            num_data=N,
+            num_latent_gps=1,
+            whiten=self.whiten,
+            q_diag=False)  # var-dist must be full covar when using natgrad
+        # Setup training parameters. We want only 2 params.
+        set_trainable(self.model.inducing_variable.Z, False)
+        set_trainable(self.kernel.variance, False)
+        set_trainable(self.kernel.lengthscales, True)
+        set_trainable(self.model.likelihood.variance, True)
+        # Variational parameters will be optimized with natgrad.
+        set_trainable(self.model.q_mu, False)
+        set_trainable(self.model.q_sqrt, False)
+
+        # Set-up for natgrad optimization
+        variational_params = [(self.model.q_mu, self.model.q_sqrt)]
+        natgrad_opt = NaturalGradient(gamma=1.0)
+        generator = partial(data_generator, X, Y)
+        if X.dtype == np.float32:
+            tf_dt = tf.float32
+        else:
+            tf_dt = tf.float64
+        print(tf_dt)
+        train_dataset = tf.data.Dataset.from_generator(generator, args=(self.batch_size, ), output_types=(tf_dt, tf_dt)) \
+            .prefetch(self.batch_size * 10) \
+            .repeat() \
+            .shuffle(min(N // self.batch_size, 1_000_000 // self.batch_size)) \
+            .batch(1)
+        train_iter = iter(train_dataset)
+        loss = self.model.training_loss_closure(train_iter)
+
+        @tf.function
+        def grad_fn():
+            grads = tf.gradients(self.model.training_loss((X, Y)), self.model.trainable_variables)
+            return grads
+
+        df = pd.DataFrame(columns=["sigma", "sigma_g", "variance", "variance_g", "elbo"])
+        for lscale in lengthscale_list:
+            self.model.kernel.lengthscales.assign([lscale])
+            for var in variance_list:
+                self.model.likelihood.variance.assign(var)
+
+                # Optimize variational parameters (a single iteration is enough with lr=1)
+                natgrad_opt.minimize(loss, var_list=variational_params)
+
+                # Get gradients and save output in df row.
+                grads = [g.numpy() for g in grad_fn()]
+                train_preds = self.model.predict_y(X)[0]
+                test_preds = self.model.predict_y(Xval)[0]
+                new_row = {
+                    'sigma': lscale,
+                    'sigma_g': grads[0][0],
+                    'variance': var,
+                    'variance_g': grads[1],
+                    'elbo': self.model.elbo((X, Y)).numpy(),
+                }
+                tr_err, tr_err_name = self.err_fn(Y, train_preds)
+                ts_err, ts_err_name = self.err_fn(Yval, test_preds)
+                new_row["train_%s" % tr_err_name] = tr_err
+                new_row["test_%s" % ts_err_name] = ts_err
+                df = df.append(new_row, ignore_index=True)
+                print(new_row)
+        return df
 
     @property
     def inducing_points(self):

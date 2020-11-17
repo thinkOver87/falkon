@@ -68,24 +68,30 @@ def run_gpflow(dataset: Dataset,
                sigma_init: float,
                opt_centers: bool,
                seed: int,
+               gradient_map: bool,
                ):
-    batch_size = 1280
+    batch_size = 1000
     dt = np.float64
+    model_type = "sgpr"
     import gpflow
+    import tensorflow_probability as tfp
     gpflow.config.set_default_float(dt)
-    from gpflow_model import TrainableSVGP
+    from gpflow_model import TrainableSVGP, TrainableSGPR, TrainableGPR
+
+    # Load data
     Xtr, Ytr, Xts, Yts, metadata = get_load_fn(dataset)(dt, as_torch=False, as_tf=True)
     err_fns = get_err_fns(dataset)
     err_fns = [functools.partial(fn, **metadata) for fn in err_fns]
     centers = metadata['centers'].astype(dt)
 
     # We use a validation split (redefinition of Xtr, Ytr).
-    train_frac = 0.8
-    idx_tr, idx_val = equal_split(Xtr.shape[0], train_frac=train_frac)
-    Xval, Yval = Xtr[idx_val], Ytr[idx_val]
-    Xtr, Ytr = Xtr[idx_tr], Ytr[idx_tr]
-    print("Splitting data for validation and testing: Have %d train - %d validation samples" %
-          (Xtr.shape[0], Xval.shape[0]))
+    if not gradient_map:
+        train_frac = 0.8
+        idx_tr, idx_val = equal_split(Xtr.shape[0], train_frac=train_frac)
+        Xval, Yval = Xtr[idx_val], Ytr[idx_val]
+        Xtr, Ytr = Xtr[idx_tr], Ytr[idx_tr]
+        print("Splitting data for validation and testing: Have %d train - %d validation samples" %
+              (Xtr.shape[0], Xval.shape[0]))
 
     # Data are divided by `lengthscales`
     # variance is multiplied outside of the exponential
@@ -95,24 +101,59 @@ def run_gpflow(dataset: Dataset,
         initial_sigma = np.array([sigma_init] * Xtr.shape[1], dtype=dt)
     else:
         raise ValueError("Sigma type %s not recognized" % (sigma_type))
-    kernel_variance = 1.0
+    kernel_variance = 3
     kernel = gpflow.kernels.SquaredExponential(lengthscales=initial_sigma, variance=kernel_variance)
+    kernel.lengthscales = gpflow.Parameter(initial_sigma, transform=tfp.bijectors.Identity())
     gpflow.set_trainable(kernel.variance, False)
     gpflow.set_trainable(kernel.lengthscales, True)
 
-    trainable_svgp = TrainableSVGP(kernel,
-                                   centers,
-                                   batch_size=batch_size,
-                                   num_iter=num_iter,
-                                   err_fn=err_fns[0],
-                                   var_dist="diag",
-                                   classif=None,
-                                   error_every=10,
-                                   train_hyperparams=True,
-                                   optimize_centers=False,
-                                   lr=lr,
-                                   natgrad_lr=0)
-    trainable_svgp.fit(Xtr, Ytr, Xval, Yval)
+
+    if model_type == "sgpr":
+        gpflow_model = TrainableSGPR(kernel,
+                                       centers,
+                                       num_iter=num_iter,
+                                       err_fn=err_fns[0],
+                                       train_hyperparams=True,
+                                       lr=lr,
+                                       )
+    elif model_type == "svgp":
+        gpflow_model = TrainableSVGP(kernel,
+                                       centers,
+                                       batch_size=batch_size,
+                                       num_iter=num_iter,
+                                       err_fn=err_fns[0],
+                                       var_dist="full",
+                                       classif=None,
+                                       error_every=10,
+                                       train_hyperparams=False,
+                                       optimize_centers=False,
+                                       lr=lr,
+                                       natgrad_lr=0.1)
+    elif model_type == "gpr":
+        gpflow_model = TrainableGPR(kernel,
+                                    num_iter=num_iter,
+                                    err_fn=err_fns[0],
+                                    lr=lr,
+                                    )
+    else:
+        raise ValueError("Model type %s" % (model_type))
+
+    if gradient_map:
+        if model_type not in ["sgpr", "svgp"]:
+            raise ValueError("Gradient-map only doable with SGPR or SVGP models")
+        df = gpflow_model.gradient_map(Xtr, Ytr, Xts, Yts, variance_list=np.linspace(0.1, 2.0, 20), lengthscale_list=np.linspace(1, 20, 20))
+        out_fn = f"./logs/gd_map_{model_type}_{dataset}_{int(datetime.datetime.timestamp(datetime.datetime.now()) * 1000)}.csv"
+        print("Saving gradient map to %s" % (out_fn))
+        df.to_csv(out_fn)
+    else:
+        gpflow_model.fit(Xtr, Ytr, Xval, Yval)
+        train_pred = gpflow_model.predict(Xtr)
+        test_pred = gpflow_model.predict(Xts)
+        print("Test (unseen) errors (no retrain)")
+        for efn in err_fns:
+            train_err, err = efn(Ytr, train_pred)
+            test_err, err = efn(Yts, test_pred)
+            print(f"Train {err}: {train_err:.5f} -- Test {err}: {test_err:.5f}")
 
 
 def run_exp(dataset: Dataset,
@@ -249,6 +290,7 @@ if __name__ == "__main__":
                    sigma_init=args.sigma_init,
                    opt_centers=args.optimize_centers,
                    seed=args.seed,
+                   gradient_map=args.map_gradient,
                    )
     elif args.map_gradient:
         run_gmap_exp(dataset=args.dataset,
