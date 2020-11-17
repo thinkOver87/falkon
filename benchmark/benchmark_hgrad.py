@@ -97,7 +97,7 @@ def run_gpflow(dataset: Dataset,
     # variance is multiplied outside of the exponential
     if sigma_type == "single":
         initial_sigma = np.array([sigma_init], dtype=dt)
-    elif sigma_type == "full":
+    elif sigma_type == "diag":
         initial_sigma = np.array([sigma_init] * Xtr.shape[1], dtype=dt)
     else:
         raise ValueError("Sigma type %s not recognized" % (sigma_type))
@@ -167,6 +167,7 @@ def run_exp(dataset: Dataset,
             penalty_init: float,
             opt_centers: bool,
             loss: str,
+            M: int,
             seed: int):
     cuda = False
     train_frac = 0.8
@@ -175,14 +176,12 @@ def run_exp(dataset: Dataset,
     torch.manual_seed(seed)
     np.random.seed(seed)
     from falkon import FalkonOptions
-    from falkon.center_selection import FixedSelector
+    from falkon.center_selection import FixedSelector, UniformSelector
     from falkon.hypergrad.falkon_ho import run_falkon_hypergrad, ValidationLoss
     loss = ValidationLoss(loss)
 
     Xtr, Ytr, Xts, Yts, metadata = get_load_fn(dataset)(np.float32, as_torch=True)
     err_fns = get_err_fns(dataset)
-
-    centers = torch.from_numpy(metadata['centers'])
 
     # We use a validation split (redefinition of Xtr, Ytr).
     idx_tr, idx_val = equal_split(Xtr.shape[0], train_frac=train_frac)
@@ -191,10 +190,20 @@ def run_exp(dataset: Dataset,
     print("Splitting data for validation and testing: Have %d train - %d validation samples" %
           (Xtr.shape[0], Xval.shape[0]))
     data = {'Xtr': Xtr, 'Ytr': Ytr, 'Xts': Xval, 'Yts': Yval}
+
+    # Center selection
+    if 'centers' in metadata:
+        centers = torch.from_numpy(metadata['centers'])
+    else:
+        selector = UniformSelector(np.random.default_rng(seed))
+        centers = selector.select(Xtr, None, M)
+
+    # Move to GPU if needed
     if cuda:
         data = {k: v.cuda() for k, v in data.items()}
         centers = centers.cuda()
 
+    # Initialize Falkon model
     falkon_opt = FalkonOptions(use_cpu=False)
 
     def cback(model):
@@ -224,11 +233,15 @@ def run_exp(dataset: Dataset,
     )
 
     # Now we have the model, retrain with the full training data and test!
+    print("Retraining on the full train dataset.")
     del data  # free GPU mem
     Xtr = torch.cat([Xtr, Xval], 0)
     Ytr = torch.cat([Ytr, Yval], 0)
     if cuda:
         Xtr, Ytr, Xts, Yts = Xtr.cuda(), Ytr.cuda(), Xts.cuda(), Yts.cuda()
+    best_model.maxiter = 20
+    best_model.error_fn = functools.partial(err_fns[0], **metadata)
+    best_model.error_every = 1
     best_model.fit(Xtr, Ytr)
     train_pred = best_model.predict(Xtr).cpu()
     test_pred = best_model.predict(Xts).cpu()
@@ -283,6 +296,8 @@ if __name__ == "__main__":
     p.add_argument('--loss', type=str, default="penalized-mse")
     p.add_argument('--map-gradient', action='store_true', help="Creates a gradient map")
     p.add_argument('--gpflow', action='store_true', help="Run GPflow model")
+    p.add_argument('--M', type=int, default=1000, required=False,
+                   help="Number of Nystrom centers for Falkon")
 
 
     args = p.parse_args()
@@ -324,5 +339,6 @@ if __name__ == "__main__":
                 penalty_init=args.penalty_init,
                 opt_centers=args.optimize_centers,
                 loss=args.loss,
-                seed=args.seed
+                seed=args.seed,
+                M=args.M,
                 )
