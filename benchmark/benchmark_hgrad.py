@@ -168,26 +168,32 @@ def run_exp(dataset: Dataset,
             opt_centers: bool,
             loss: str,
             seed: int):
+    cuda = False
+    train_frac = 0.8
+
     import torch
     torch.manual_seed(seed)
+    np.random.seed(seed)
     from falkon import FalkonOptions
     from falkon.center_selection import FixedSelector
-    from falkon.hypergrad.falkon_ho import run_falkon_hypergrad, map_gradient, ValidationLoss
+    from falkon.hypergrad.falkon_ho import run_falkon_hypergrad, ValidationLoss
     loss = ValidationLoss(loss)
 
     Xtr, Ytr, Xts, Yts, metadata = get_load_fn(dataset)(np.float32, as_torch=True)
     err_fns = get_err_fns(dataset)
 
-    centers = torch.from_numpy(metadata['centers']).cuda()
+    centers = torch.from_numpy(metadata['centers'])
 
     # We use a validation split (redefinition of Xtr, Ytr).
-    train_frac = 0.8
     idx_tr, idx_val = equal_split(Xtr.shape[0], train_frac=train_frac)
     Xval, Yval = Xtr[idx_val], Ytr[idx_val]
     Xtr, Ytr = Xtr[idx_tr], Ytr[idx_tr]
     print("Splitting data for validation and testing: Have %d train - %d validation samples" %
           (Xtr.shape[0], Xval.shape[0]))
-    data = {'Xtr': Xtr.cuda(), 'Ytr': Ytr.cuda(), 'Xts': Xval.cuda(), 'Yts': Yval.cuda()}
+    data = {'Xtr': Xtr, 'Ytr': Ytr, 'Xts': Xval, 'Yts': Yval}
+    if cuda:
+        data = {k: v.cuda() for k, v in data.items()}
+        centers = centers.cuda()
 
     falkon_opt = FalkonOptions(use_cpu=False)
 
@@ -218,11 +224,14 @@ def run_exp(dataset: Dataset,
     )
 
     # Now we have the model, retrain with the full training data and test!
-    Xtr = torch.cat([Xtr, Xval], 0).cuda()
-    Ytr = torch.cat([Ytr, Yval], 0).cuda()
+    del data  # free GPU mem
+    Xtr = torch.cat([Xtr, Xval], 0)
+    Ytr = torch.cat([Ytr, Yval], 0)
+    if cuda:
+        Xtr, Ytr, Xts, Yts = Xtr.cuda(), Ytr.cuda(), Xts.cuda(), Yts.cuda()
     best_model.fit(Xtr, Ytr)
     train_pred = best_model.predict(Xtr).cpu()
-    test_pred = best_model.predict(Xts.cuda()).cpu()
+    test_pred = best_model.predict(Xts).cpu()
 
     print("Test (unseen) errors after retraining on the full train dataset")
     for efn in err_fns:
@@ -230,7 +239,7 @@ def run_exp(dataset: Dataset,
         test_err, err = efn(Yts.cpu(), test_pred, **metadata)
         print(f"Train {err}: {train_err:.5f} -- Test {err}: {test_err:.5f}")
 
-    # Create a dataframe for saving
+    # Create a dataframe for saving the optimization trajectory.
     if sigma_type == "single":
         penalties = np.array([hp[0].cpu().item() for hp in hps[:-1]])
         sigmas = np.array([hp[1][0].cpu().item() for hp in hps[:-1]])
@@ -243,6 +252,8 @@ def run_exp(dataset: Dataset,
         out_fn = f"./logs/hotraj_{dataset}_{int(datetime.datetime.timestamp(datetime.datetime.now()) * 1000)}.csv"
         print("Saving HyperOpt trajectory to %s" % (out_fn))
         df.to_csv(out_fn)
+    else:
+        print("Cannot save trajectory with multiple lengthscales!")
 
 
 if __name__ == "__main__":

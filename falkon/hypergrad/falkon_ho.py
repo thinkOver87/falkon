@@ -1,11 +1,12 @@
 import dataclasses
 import time
-from typing import Union
+from typing import Union, List, Optional
 from enum import Enum
 
 import pandas as pd
 import numpy as np
 import torch
+from torch.distributions import transforms
 
 import falkon
 from falkon.center_selection import UniformSelector, FixedSelector, CenterSelector
@@ -24,6 +25,15 @@ class ValidationLoss(Enum):
 
     def __repr__(self):
         return str(self)
+
+
+class HyperParam():
+    def __init__(self, starting_value: torch.Tensor, transform: Optional[transforms.Transform] = None):
+        self.val = starting_value
+        self.trans = transforms
+
+    def __get__(self):
+        return self.trans(self.val)
 
 
 class FalkonHO(AbsHypergradModel):
@@ -54,18 +64,16 @@ class FalkonHO(AbsHypergradModel):
     def inner_opt(self, params, hparams):
         """This is NOT DIFFERENTIABLE"""
         alpha, beta = params['alpha'], params['alpha_pc']
-        penalty, sigma = hparams['penalty'], hparams['sigma']
+        penalty, sigma = hparams['penalty'].detach(), hparams['sigma'].detach()
         if 'centers' in hparams:
             center_selection = FixedSelector(hparams['centers'].detach())
         else:
             center_selection = self.center_selection
 
-        kernel = DiffGaussianKernel(sigma.detach(), self.opt)
-        def sq_err(y_true, y_pred):
-            return torch.mean((y_true - y_pred)**2)
+        kernel = DiffGaussianKernel(sigma, self.opt)
         self.flk = self.flk_class(
             kernel,
-            torch.exp(-penalty.detach()).item(),
+            torch.exp(-penalty).item(),
             self.M,
             center_selection=center_selection,
             maxiter=self.maxiter,
