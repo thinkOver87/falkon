@@ -95,15 +95,18 @@ class ConjugateGradient(Optimizer):
 
 
 class FalkonConjugateGradient(Optimizer):
-    def __init__(self, kernel, preconditioner, opt: FalkonOptions):
+    def __init__(self, kernel, preconditioner, opt: FalkonOptions, N=None):
         super().__init__()
         self.kernel = kernel
         self.preconditioner = preconditioner
         self.params = opt
         self.optimizer = ConjugateGradient(opt.get_conjgrad_options())
+        self.N = N
 
     def solve(self, X, M, Y, _lambda, initial_solution, max_iter, callback=None):
-        n = X.size(0)
+        N = self.N
+        if self.N is None:
+            N = X.size(0)
         prec = self.preconditioner
 
         with TicToc("ConjGrad preparation", False):
@@ -113,9 +116,9 @@ class FalkonConjugateGradient(Optimizer):
                 Knm = None
             # Compute the right hand side
             if Knm is not None:
-                B = incore_fmmv(Knm, Y / n, None, transpose=True, opt=self.params)
+                B = incore_fmmv(Knm, Y / N, None, transpose=True, opt=self.params)
             else:
-                B = self.kernel.dmmv(X, M, None, Y / n, opt=self.params)
+                B = self.kernel.dmmv(X, M, None, Y / N, opt=self.params)
 
             B = prec.apply_t(B)
 
@@ -136,14 +139,14 @@ class FalkonConjugateGradient(Optimizer):
                     if X.is_cuda:
                         with torch.cuda.stream(s1), torch.cuda.device(X.device):
                             # We must sync before calls to prec.inv* which use a different stream
-                            cc_ = cc.div_(n)
+                            cc_ = cc.div_(N)
                             v_ = v.mul_(_lambda)
                             s1.synchronize()
                             cc_ = prec.invTt(cc_).add_(v_)
                             s1.synchronize()
                             return prec.invAt(cc_)
                     else:
-                        return prec.invAt(prec.invTt(cc / n) + _lambda * v)
+                        return prec.invAt(prec.invTt(cc / N) + _lambda * v)
 
         # Run the conjugate gradient solver
         beta = self.optimizer.solve(initial_solution, B, mmv, max_iter, callback)

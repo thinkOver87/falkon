@@ -100,6 +100,7 @@ class Falkon(FalkonBase):
                  kernel: falkon.kernels.Kernel,
                  penalty: float,
                  M: int,
+                 N: Optional[int] = None,
                  center_selection: Union[str, falkon.center_selection.CenterSelector] = 'uniform',
                  maxiter: int = 20,
                  seed: Optional[int] = None,
@@ -112,6 +113,7 @@ class Falkon(FalkonBase):
         self.maxiter = maxiter
         self._init_cuda()
         self.beta_ = None
+        self.N = None
 
     def fit(self,
             X: torch.Tensor,
@@ -217,7 +219,7 @@ class Falkon(FalkonBase):
             if o_opt.debug:
                 print("Optimizer will run on %s" %
                       ("CPU" if o_opt.use_cpu else ("%d GPUs" % self.num_gpus)), flush=True)
-            optim = falkon.optim.FalkonConjugateGradient(self.kernel, precond, o_opt)
+            optim = falkon.optim.FalkonConjugateGradient(self.kernel, precond, o_opt, self.N)
             if Knm is not None:
                 beta = optim.solve(
                     Knm, None, Y, self.penalty, initial_solution=warm_start,
