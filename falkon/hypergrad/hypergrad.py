@@ -6,6 +6,56 @@ import torch
 
 from falkon.hypergrad.common import AbsHypergradModel
 
+def direct_trgrad(params, hparams, model, set_grad):
+    time_s = time.time()
+    # call `detach` to avoid any residual gradient in the parameters to affect
+    # the validation loss gradients
+    params = {k: w.detach().requires_grad_(True) for k, w in params.items()}
+    grad_outer_params, grad_outer_hparams = model.val_loss_grads(params, hparams)
+    val_time = time.time()
+
+    final_grads = []
+    for ohp in grad_outer_hparams:
+        if ohp is not None:
+            final_grads.append(ohp)
+        else:
+            raise RuntimeError("Validation error must depend on all hparams for the direct method")
+
+    if set_grad:
+        for l, g in zip(list(hparams.values()), final_grads):
+            if l.grad is None:
+                l.grad = torch.zeros_like(l)
+            if g is not None:
+                l.grad += g
+
+    return model.val_loss(params, hparams), final_grads
+
+
+def direct_valgrad(params, hparams, model, set_grad):
+    time_s = time.time()
+    # call `detach` to avoid any residual gradient in the parameters to affect
+    # the validation loss gradients
+    params = {k: w.detach().requires_grad_(True) for k, w in params.items()}
+    grad_outer_params, grad_outer_hparams = model.val_loss_grads(params, hparams)
+    val_time = time.time()
+
+    final_grads = []
+    for ohp in grad_outer_hparams:
+        if ohp is not None:
+            final_grads.append(ohp)
+        else:
+            raise RuntimeError("Validation error must depend on all hparams for the direct method")
+
+    if set_grad:
+        for l, g in zip(list(hparams.values()), final_grads):
+            if l.grad is None:
+                l.grad = torch.zeros_like(l)
+            if g is not None:
+                l.grad += g
+
+    return model.val_loss(params, hparams), final_grads
+
+
 
 def compute_hypergrad(params: Dict[str, torch.Tensor],
                       hparams: Dict[str, torch.Tensor],

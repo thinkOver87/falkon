@@ -1,4 +1,5 @@
 import argparse
+import time
 import datetime
 import functools
 
@@ -172,7 +173,10 @@ def run_exp(dataset: Dataset,
     cuda = False
     train_frac = 0.8
     sgd = True
-    batch_size = 30_000
+    batch_size = 16_000
+    cg_tol = 1e-4
+    warm_start = True
+    error_every = 10
 
     import torch
     torch.manual_seed(seed)
@@ -206,14 +210,18 @@ def run_exp(dataset: Dataset,
         centers = centers.cuda()
 
     # Initialize Falkon model
-    falkon_opt = FalkonOptions(use_cpu=False)
+    falkon_opt = FalkonOptions(use_cpu=False, debug=False, cg_tolerance=cg_tol)
 
-    def cback(model):
+    t_s = time.time()
+    def cback(i, model):
+        if i % error_every != 0:
+            return
         train_pred = model.predict(data['Xtr'])
         val_pred = model.predict(data['Xts'])
         train_err, err = err_fns[0](data['Ytr'].cpu(), train_pred.cpu(), **metadata)
         val_err, err = err_fns[0](data['Yts'].cpu(), val_pred.cpu(), **metadata)
-        print(f"Train {err}: {train_err:.5f} -- Val {err}: {val_err:.5f}")
+        print(f"Iteration {i} ({time.time() - t_s:.2f}s) - Train {err}: {train_err:.5f} -- Val {err}: {val_err:.5f}")
+        print(model.ny_points_)
 
     if sgd:
         hps, val_loss, hgrads, best_model, times = stochastic_flk_hypergrad(
@@ -230,9 +238,10 @@ def run_exp(dataset: Dataset,
             hessian_cg_steps=hessian_cg_steps,
             hessian_cg_tol=hessian_cg_tol,
             callback=cback,
-            debug=True,
+            debug=False,
             loss=loss,
             batch_size=batch_size,
+            warm_start=warm_start,
         )
     else:
         hps, val_loss, hgrads, best_model, times = run_falkon_hypergrad(
@@ -250,8 +259,9 @@ def run_exp(dataset: Dataset,
             hessian_cg_steps=hessian_cg_steps,
             hessian_cg_tol=hessian_cg_tol,
             callback=cback,
-            debug=True,
+            debug=False,
             loss=loss,
+            warm_start=warm_start,
         )
 
     # Now we have the model, retrain with the full training data and test!

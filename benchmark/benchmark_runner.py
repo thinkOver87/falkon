@@ -7,7 +7,6 @@ from typing import Optional, List
 
 import numpy as np
 
-from gpytorch_sgpr import GpytorchSGPR
 from benchmark_utils import *
 from datasets import get_load_fn, get_cv_fn
 from error_metrics import get_err_fns, get_tf_err_fn
@@ -132,6 +131,7 @@ def run_gpytorch_sgpr(dset: Dataset,
                       seed: int,
                       ):
     import torch
+    from gpytorch_sgpr import GpytorchSGPR
     torch.manual_seed(seed)
     np.random.seed(seed)
 
@@ -520,19 +520,11 @@ def run_gpflow(dset: Dataset,
 
     err_fns = get_err_fns(dset)
 
-    # Kernel
-    sigma_initial = np.array(kernel_sigma, dtype=dtype.to_numpy_dtype())
-    kernel = gpflow.kernels.SquaredExponential(lengthscales=sigma_initial, variance=kernel_variance)
-
-    def get_model(Xtr, num_outputs, err_fn):
+    def get_model(Xtr, num_outputs, err_fn, kernel):
         # Inducing points
-        if ind_pt_file is None or not os.path.isfile(ind_pt_file):
-            inducing_idx = np.random.choice(Xtr.shape[0], num_centers, replace=False)
-            inducing_points = Xtr[inducing_idx].reshape(num_centers, -1)
-            print("Took %d random inducing points" % (inducing_points.shape[0]))
-        else:
-            inducing_points = np.load(ind_pt_file).astype(dtype.to_numpy_dtype())
-            print("Loaded %d inducing points to %s" % (inducing_points.shape[0], ind_pt_file))
+        inducing_idx = np.random.choice(Xtr.shape[0], num_centers, replace=False)
+        inducing_points = Xtr[inducing_idx].reshape(num_centers, -1)
+        print("Took %d random inducing points" % (inducing_points.shape[0]))
 
         num_classes = 0
         if algorithm == Algorithm.GPFLOW_CLS:
@@ -551,6 +543,7 @@ def run_gpflow(dset: Dataset,
             var_dist=var_dist,
             error_every=error_every,
             train_hyperparams=learn_ind_pts,
+            optimize_centers=True,
             natgrad_lr=natgrad_lr,
         )
         return model
@@ -558,7 +551,10 @@ def run_gpflow(dset: Dataset,
     load_fn = get_load_fn(dset)
     Xtr, Ytr, Xts, Yts, kwargs = load_fn(dtype=dtype.to_numpy_dtype(), as_torch=False, as_tf=True)
     err_fns = [functools.partial(fn, **kwargs) for fn in err_fns]
-    model = get_model(Xtr, Ytr.shape[1], err_fns[0])
+    # Kernel
+    sigma_initial = np.array(kernel_sigma, dtype=dtype.to_numpy_dtype())
+    kernel = gpflow.kernels.SquaredExponential(lengthscales=sigma_initial, variance=kernel_variance)
+    model = get_model(Xtr, Ytr.shape[1], err_fns[0], kernel)
     t_s = time.time()
     print("Starting to train model %s on data %s" % (model, dset), flush=True)
     model.fit(Xtr, Ytr, Xts, Yts)

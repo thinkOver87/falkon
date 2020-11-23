@@ -13,7 +13,7 @@ import falkon
 from falkon.center_selection import UniformSelector, FixedSelector, CenterSelector
 from falkon.kernels.diff_rbf_kernel import DiffGaussianKernel
 from falkon.hypergrad.common import AbsHypergradModel
-from falkon.hypergrad.hypergrad import compute_hypergrad
+from falkon.hypergrad.hypergrad import compute_hypergrad, direct_valgrad
 from falkon.optim import ConjugateGradient
 
 
@@ -47,7 +47,8 @@ class FalkonHO(AbsHypergradModel):
                  Xts,
                  Yts,
                  opt,
-                 loss: ValidationLoss):
+                 loss: ValidationLoss,
+                 warm_start: bool = True):
         super().__init__()
         self.Xtr = Xtr
         self.Ytr = Ytr
@@ -61,13 +62,14 @@ class FalkonHO(AbsHypergradModel):
         self.center_selection = center_selection
         self.flk = None
         self.loss = loss
+        self.warm_start = warm_start
 
     def inner_opt(self, params, hparams):
         """This is NOT DIFFERENTIABLE"""
         alpha, beta = params['alpha'], params['alpha_pc']
         penalty, sigma = hparams['penalty'].detach(), hparams['sigma'].detach()
         if 'centers' in hparams:
-            center_selection = FixedSelector(hparams['centers'].detach())
+            center_selection = FixedSelector(hparams['centers'].detach().clone())
         else:
             center_selection = self.center_selection
 
@@ -80,7 +82,10 @@ class FalkonHO(AbsHypergradModel):
             maxiter=self.maxiter,
             seed=129,
             options=self.opt)
-        self.flk.fit(self.Xtr, self.Ytr, warm_start=beta.detach().clone())
+        if self.warm_start:
+            self.flk.fit(self.Xtr, self.Ytr, warm_start=beta.detach().clone())
+        else:
+            self.flk.fit(self.Xtr, self.Ytr)
 
         return {'alpha': self.flk.alpha_, 'alpha_pc': self.flk.beta_}
 
@@ -92,6 +97,7 @@ class FalkonHO(AbsHypergradModel):
             ny_points = hparams['centers']
         else:
             ny_points = self.flk.ny_points_
+        kernel = DiffGaussianKernel(sigma, self.opt)
         preds = kernel.mmv(self.Xts, ny_points, alpha)
         return torch.mean((preds - self.Yts) ** 2)
 
@@ -283,6 +289,7 @@ def run_falkon_hypergrad(data,
                          callback,
                          debug,
                          loss: ValidationLoss,
+                         warm_start: bool,
                          sigma_init: float = 2,
                          penalty_init: float = 1):
     Xtr, Ytr, Xts, Yts = data['Xtr'], data['Ytr'], data['Xts'], data['Yts']
@@ -312,7 +319,7 @@ def run_falkon_hypergrad(data,
         hparams['centers'] = falkon_centers.select(Xtr, Y=None, M=falkon_M).requires_grad_()
 
     outer_opt = torch.optim.Adam(lr=outer_lr, params=hparams.values())
-    flk_helper = FalkonHO(falkon_M, falkon_centers, falkon_maxiter, Xtr, Ytr, Xts, Yts, falkon_opt, loss)
+    flk_helper = FalkonHO(falkon_M, falkon_centers, falkon_maxiter, Xtr, Ytr, Xts, Yts, falkon_opt, loss, warm_start=warm_start)
 
     hparam_history = [[h.detach().clone() for h in hparams.values()]]
     val_loss_history = []
@@ -322,10 +329,8 @@ def run_falkon_hypergrad(data,
         # Run inner loop to get alpha_*
         i_start = time.time()
         params = flk_helper.inner_opt(params, hparams)
-        if debug:
-            if callback is not None:
-                callback(flk_helper.model)
-            print()
+        if callback is not None:
+            callback(o_step, flk_helper.model)
         inner_opt_t = time.time()
 
         outer_opt.zero_grad()
@@ -349,6 +354,45 @@ def run_falkon_hypergrad(data,
     return hparam_history, val_loss_history, hgrad_history, flk_helper.model, time_history
 
 
+class FastTensorDataLoader:
+    def __init__(self, *tensors, batch_size, shuffle=False, drop_last=False):
+        assert all(t.shape[0] == tensors[0].shape[0] for t in tensors)
+        self.tensors = tensors
+        self.num_points = self.tensors[0].shape[0]
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.drop_last = drop_last
+
+        n_batches, remainder = divmod(self.num_points, self.batch_size)
+        if remainder > 0 and not drop_last:
+            n_batches += 1
+        self.n_batches = n_batches
+
+    def __iter__(self):
+        if self.shuffle:
+            self.indices = torch.randperm(self.num_points)
+        else:
+            self.indices = None
+        self.i = 0
+        return self
+
+    def __next__(self):
+        if self.i >= self.n_batches:  # This should handle drop_last correctly
+            self.__iter__()
+        if self.indices is not None:
+            indices = self.indices[self.i * self.batch_size : (self.i + 1) * self.batch_size]
+            batch = tuple(torch.index_select(t, 0, indices) for t in self.tensors)
+        else:
+            batch = tuple(t[self.i * self.batch_size : (self.i + 1) * self.batch_size] for t in self.tensors)
+        self.i += 1
+        return batch
+
+    def __len__(self):
+        return self.n_batches
+
+
+
+
 def stochastic_flk_hypergrad(
                          data,
                          falkon_centers: CenterSelector,
@@ -365,7 +409,8 @@ def stochastic_flk_hypergrad(
                          debug: bool,
                          loss: ValidationLoss,
                          sigma_init: float = 2,
-                         penalty_init: float = 1):
+                         penalty_init: float = 1,
+                         warm_start: bool = True,):
     Xtr, Ytr, Xts, Yts = data['Xtr'], data['Ytr'], data['Xts'], data['Yts']
 
     if batch_size < falkon_M:
@@ -386,52 +431,59 @@ def stochastic_flk_hypergrad(
     hparams = {
         'penalty': torch.tensor(penalty_init, requires_grad=True, dtype=dt, device=dev),  # e^{-penalty}
         'sigma': torch.tensor(start_sigma, requires_grad=True, dtype=dt, device=dev),
+        'centers': falkon_centers.select(Xtr, Y=None, M=falkon_M).requires_grad_(),
     }
     params = {
         'alpha': torch.zeros(falkon_M, t, requires_grad=True, dtype=dt, device=dev),
         'alpha_pc': torch.zeros(falkon_M, t, requires_grad=True, dtype=dt, device=dev),
     }
-    # Nystrom centers: Need to decide whether to optimize them as well
-    hparams['centers'] = falkon_centers.select(Xtr, Y=None, M=falkon_M).requires_grad_()
 
-    outer_opt = torch.optim.Adam(lr=outer_lr, params=hparams.values())
+    outer_opt = torch.optim.Adam([
+            {'params': hparams['penalty']},
+            {'params': hparams['sigma']},
+            {'params': hparams['centers']}
+        ], lr=outer_lr)
     hparam_history = [[h.detach().clone() for h in hparams.values()]]
     val_loss_history = []
     hgrad_history = []
     time_history = []
 
-    trainset = TensorDataset(Xtr, Ytr)
-    train_loader = DataLoader(trainset, batch_size=batch_size, shuffle=True, num_workers=0,
-                              pin_memory=True, drop_last=True)
-    testset = TensorDataset(Xts, Yts)
-    test_loader = DataLoader(testset, batch_size=batch_size, shuffle=True, num_workers=0,
-                             pin_memory=True)
+    train_loader = FastTensorDataLoader(Xtr, Ytr, batch_size=batch_size, shuffle=True, drop_last=False)
+    train_loader = iter(train_loader)
+    test_loader = FastTensorDataLoader(Xts, Yts, batch_size=batch_size, shuffle=True, drop_last=False)
+    test_loader = iter(test_loader)
 
     for o_step in range(outer_steps):
         i_start = time.time()
-        b_tr_x, b_tr_y = next(iter(train_loader))
-        b_ts_x, b_ts_y = next(iter(test_loader))
+        b_tr_x, b_tr_y = next(train_loader)
+        b_ts_x, b_ts_y = next(test_loader)
         flk_helper = FalkonHO(
-            falkon_M, falkon_centers, falkon_maxiter, b_tr_x, b_tr_y, b_ts_x, b_ts_y, falkon_opt, loss)
+            falkon_M, falkon_centers, falkon_maxiter, b_tr_x, b_tr_y, b_ts_x, b_ts_y, falkon_opt, loss,
+            warm_start=warm_start)
 
+        i_data_load = time.time()
         params = flk_helper.inner_opt(params, hparams)
-        if debug:
-            if callback is not None:
-                callback(flk_helper.model)
-            print()
+        if callback is not None:
+            callback(o_step, flk_helper.model)
         inner_opt_t = time.time()
 
         # Start 'outer_opt'
         outer_opt.zero_grad()
+        #hgrad_out = direct_valgrad(params, hparams, flk_helper, set_grad=True)
         hgrad_out = compute_hypergrad(params, hparams, model=flk_helper, cg_steps=hessian_cg_steps,
                                       cg_tol=hessian_cg_tol, set_grad=True, timings=debug)
+
+        #print(hparams['centers'].grad)
+        #hparams['penalty'].grad = None
+        #hparams['sigma'].grad = None
+        #hparams['centers'].grad = None
         outer_opt.step()
         hparams['penalty'].data.clamp_(min=1e-10)
         hparams['sigma'].data.clamp_(min=1e-10)
         i_end = time.time()
 
         if debug:
-            print("[%4d/%4d] - time %.2fs (inner-opt %.2fs, outer-opt %.2fs)" % (o_step, outer_steps, i_end - i_start, inner_opt_t - i_start, i_end - inner_opt_t))
+            print("[%4d/%4d] - time %.2fs (data-load %.2fs, inner-opt %.2fs, outer-opt %.2fs)" % (o_step, outer_steps, i_end - i_start, i_data_load - i_start, inner_opt_t - i_data_load, i_end - inner_opt_t))
             #print("GRADIENT", hgrad_out[1])
             print("NEW HPARAMS", hparams)
             print("NEW VAL LOSS", hgrad_out[0])

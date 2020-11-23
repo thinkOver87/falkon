@@ -58,7 +58,8 @@ class DiffGaussianKernel(GaussianKernel):
         return functools.partial(self.keops_dmmv_helper, mmv_fn=self._keops_mmv_impl)
 
     def _prepare(self, X1, X2):
-        return super()._prepare(X1.div(self.gamma), X2.div(self.gamma))
+        gamma = self.gamma.to(device=X1.device, dtype=X1.dtype)
+        return super()._prepare(X1.div(gamma), X2.div(gamma))
 
     def _apply(self, X1, X2, out):
         gamma = self.gamma.to(device=X1.device, dtype=X1.dtype)
