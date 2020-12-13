@@ -103,6 +103,7 @@ class InCoreFalkon(FalkonBase):
                  error_fn: Optional[Callable[[torch.Tensor, torch.Tensor], float]] = None,
                  error_every: Optional[int] = 1,
                  options: Optional[FalkonOptions] = None,
+                 N: int = None,
                  ):
         super().__init__(kernel, M, center_selection, seed, error_fn, error_every, options)
         self.penalty = penalty
@@ -113,6 +114,7 @@ class InCoreFalkon(FalkonBase):
                                "'use_cpu=False' in the `FalkonOptions` object.")
         self._init_cuda()
         self.beta_ = None
+        self.N = N
 
     def _check_fit_inputs(self, X, Y, Xts, Yts):
         if not check_same_device(X, Y, Xts, Yts) or (not X.is_cuda):
@@ -201,7 +203,7 @@ class InCoreFalkon(FalkonBase):
 
         # Start with the falkon algorithm
         with TicToc('Computing Falkon iterations', debug=self.options.debug):
-            optim = falkon.optim.FalkonConjugateGradient(self.kernel, precond, self.options)
+            optim = falkon.optim.FalkonConjugateGradient(self.kernel, precond, self.options, self.N)
             if Knm is not None:
                 beta = optim.solve(
                     Knm, None, Y, self.penalty, initial_solution=warm_start,

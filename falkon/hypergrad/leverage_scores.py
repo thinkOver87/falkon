@@ -12,10 +12,11 @@ def subs_deff_simple(kernel: falkon.kernels.Kernel,
     K_XJ = kernel(X, J)
 
     # Inversion
-    U, S, _ = torch.svd(K_JJ + penalty * n * torch.eye(K_JJ.shape[0]))
+    U, S, _ = torch.svd(K_JJ + penalty * n * torch.eye(K_JJ.shape[0], dtype=K_JJ.dtype, device=K_JJ.device))
     # Exclude eigen-values close to 0
     thresh = (S[0] * S.shape[0] * torch.finfo(S.dtype).eps).item()
     stable_eig = (S > thresh)
+    print("%d stable eigenvalues" % (stable_eig.sum()))
     U_thin = U[:, stable_eig]  # n x m
     S_thin = S[stable_eig]     # m
     S_thin_root_inv = torch.sqrt(S_thin).reciprocal().reshape(-1, 1)  # m x 1

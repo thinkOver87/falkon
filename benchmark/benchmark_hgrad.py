@@ -8,7 +8,7 @@ import pandas as pd
 
 from datasets import get_load_fn, equal_split
 from benchmark_utils import *
-from error_metrics import get_err_fns
+from error_metrics import get_err_fns, mse
 
 
 def run_gmap_exp(dataset: Dataset,
@@ -157,6 +157,97 @@ def run_gpflow(dataset: Dataset,
             print(f"Train {err}: {train_err:.5f} -- Test {err}: {test_err:.5f}")
 
 
+def run_nkrr(dataset: Dataset,
+             num_epochs: int,
+             hp_lr: float,
+             p_lr: float,
+             sigma_type: str,
+             sigma_init: float,
+             penalty_init: float,
+             M: int,
+             seed: int,
+             regularizer: str,
+             ):
+    cuda = True
+    batch_size = 64000
+    loss_every = 10
+    mode = "flk"  # flk, flk_val
+
+    print("Running Hyperparameter Tuning Experiment.")
+    print(f"CUDA: {cuda} -- Batch {batch_size} -- Loss report {loss_every} -- Mode {mode}.")
+
+    import torch
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    from falkon import FalkonOptions
+    from falkon.center_selection import FixedSelector, UniformSelector
+    from falkon.hypergrad.nkrr_ho import nkrr_ho, flk_nkrr_ho, flk_nkrr_ho_val
+
+    Xtr, Ytr, Xts, Yts, metadata = get_load_fn(dataset)(np.float32, as_torch=True)
+    err_fns = get_err_fns(dataset)
+
+    # Center selection
+    selector = UniformSelector(np.random.default_rng(seed))
+    centers = selector.select(Xtr, None, M)
+
+    # Initialize Falkon model
+    falkon_opt = FalkonOptions(use_cpu=False, debug=False, cg_tolerance=1e-3)
+
+    if mode == "nkrr":
+        nkrr_ho(
+            Xtr, Ytr, Xts, Yts,
+            num_epochs=num_epochs,
+            sigma_type=sigma_type,
+            sigma_init=sigma_init,
+            penalty_init=penalty_init,
+            falkon_centers=FixedSelector(centers),
+            falkon_M=M,
+            hp_lr=hp_lr,
+            p_lr=p_lr,
+            batch_size=batch_size,
+            cuda=cuda,
+            err_fn=err_fns[0],
+            opt=falkon_opt,
+            loss_every=loss_every,
+        )
+    elif mode == "flk":
+        flk_nkrr_ho(
+            Xtr, Ytr, Xts, Yts,
+            num_epochs=num_epochs,
+            sigma_type=sigma_type,
+            sigma_init=sigma_init,
+            penalty_init=penalty_init,
+            falkon_centers=FixedSelector(centers),
+            falkon_M=M,
+            hp_lr=hp_lr,
+            p_lr=0.01,  # Unused
+            batch_size=batch_size,
+            cuda=cuda,
+            err_fn=err_fns[0],
+            opt=falkon_opt,
+            loss_every=loss_every,
+            regularizer=regularizer,
+        )
+    elif mode == "flk_val":
+        flk_nkrr_ho_val(
+            Xtr, Ytr, Xts, Yts,
+            num_epochs=num_epochs,
+            sigma_type=sigma_type,
+            sigma_init=sigma_init,
+            penalty_init=penalty_init,
+            falkon_centers=FixedSelector(centers),
+            falkon_M=M,
+            hp_lr=hp_lr,
+            p_lr=0.01,  # Unused
+            batch_size=batch_size,
+            cuda=cuda,
+            err_fn=err_fns[0],
+            opt=falkon_opt,
+            loss_every=loss_every,
+        )
+
+
+
 def run_exp(dataset: Dataset,
             inner_maxiter: int,
             outer_lr: float,
@@ -173,10 +264,10 @@ def run_exp(dataset: Dataset,
     cuda = False
     train_frac = 0.8
     sgd = True
-    batch_size = 16_000
+    batch_size = 32_000
     cg_tol = 1e-4
     warm_start = True
-    error_every = 10
+    error_every = 100
 
     import torch
     torch.manual_seed(seed)
@@ -184,6 +275,7 @@ def run_exp(dataset: Dataset,
     from falkon import FalkonOptions
     from falkon.center_selection import FixedSelector, UniformSelector
     from falkon.hypergrad.falkon_ho import run_falkon_hypergrad, ValidationLoss, stochastic_flk_hypergrad
+    torch.autograd.set_detect_anomaly(True)
     loss = ValidationLoss(loss)
 
     Xtr, Ytr, Xts, Yts, metadata = get_load_fn(dataset)(np.float32, as_torch=True)
@@ -191,11 +283,12 @@ def run_exp(dataset: Dataset,
 
     # We use a validation split (redefinition of Xtr, Ytr).
     idx_tr, idx_val = equal_split(Xtr.shape[0], train_frac=train_frac)
-    Xval, Yval = Xtr[idx_val], Ytr[idx_val]
-    Xtr, Ytr = Xtr[idx_tr], Ytr[idx_tr]
-    print("Splitting data for validation and testing: Have %d train - %d validation samples" %
-          (Xtr.shape[0], Xval.shape[0]))
-    data = {'Xtr': Xtr, 'Ytr': Ytr, 'Xts': Xval, 'Yts': Yval}
+    #Xval, Yval = Xtr[idx_val], Ytr[idx_val]
+    #Xtr, Ytr = Xtr[idx_tr], Ytr[idx_tr]
+    #print("Splitting data for validation and testing: Have %d train - %d validation samples" %
+    #      (Xtr.shape[0], Xval.shape[0]))
+    #data = {'Xtr': Xtr, 'Ytr': Ytr, 'Xts': Xval, 'Yts': Yval}
+    data = {'Xtr': Xtr, 'Ytr': Ytr, 'Xts': Xtr, 'Yts': Ytr}
 
     # Center selection
     if 'centers' in metadata:
@@ -216,12 +309,13 @@ def run_exp(dataset: Dataset,
     def cback(i, model):
         if i % error_every != 0:
             return
-        train_pred = model.predict(data['Xtr'])
-        val_pred = model.predict(data['Xts'])
+        train_pred = model.predict(data['Xtr'].cuda())
+        #val_pred = model.predict(data['Xts'])
+        val_pred = model.predict(Xts.cuda())
         train_err, err = err_fns[0](data['Ytr'].cpu(), train_pred.cpu(), **metadata)
-        val_err, err = err_fns[0](data['Yts'].cpu(), val_pred.cpu(), **metadata)
+        #val_err, err = err_fns[0](data['Yts'].cpu(), val_pred.cpu(), **metadata)
+        val_err, err = err_fns[0](Yts.cpu(), val_pred.cpu(), **metadata)
         print(f"Iteration {i} ({time.time() - t_s:.2f}s) - Train {err}: {train_err:.5f} -- Val {err}: {val_err:.5f}")
-        print(model.ny_points_)
 
     if sgd:
         hps, val_loss, hgrads, best_model, times = stochastic_flk_hypergrad(
@@ -238,10 +332,11 @@ def run_exp(dataset: Dataset,
             hessian_cg_steps=hessian_cg_steps,
             hessian_cg_tol=hessian_cg_tol,
             callback=cback,
-            debug=False,
+            debug=True,
             loss=loss,
             batch_size=batch_size,
             warm_start=warm_start,
+            cuda=True,
         )
     else:
         hps, val_loss, hgrads, best_model, times = run_falkon_hypergrad(
@@ -328,8 +423,11 @@ if __name__ == "__main__":
     p.add_argument('--loss', type=str, default="penalized-mse")
     p.add_argument('--map-gradient', action='store_true', help="Creates a gradient map")
     p.add_argument('--gpflow', action='store_true', help="Run GPflow model")
+    p.add_argument('--nkrr', action='store_true', help="Run NKRR model")
     p.add_argument('--M', type=int, default=1000, required=False,
                    help="Number of Nystrom centers for Falkon")
+    p.add_argument('--regularizer', type=str, default='tikhonov',
+                   help="How to regularize the loss in FLK-NKRR")
 
 
     args = p.parse_args()
@@ -359,6 +457,18 @@ if __name__ == "__main__":
                      loss=args.loss,
                      seed=args.seed,
                      )
+    elif args.nkrr:
+        run_nkrr(dataset=args.dataset,
+                 num_epochs=args.steps,
+                 hp_lr=args.lr,
+                 p_lr=args.lr,
+                 sigma_type=args.sigma_type,
+                 sigma_init=args.sigma_init,
+                 penalty_init=args.penalty_init,
+                 M=args.M,
+                 seed=args.seed,
+                 regularizer=args.regularizer,
+                 )
     else:
         run_exp(dataset=args.dataset,
                 inner_maxiter=args.flk_steps,

@@ -48,6 +48,7 @@ class FalkonHO(AbsHypergradModel):
                  Yts,
                  opt,
                  loss: ValidationLoss,
+                 tot_N: int,
                  warm_start: bool = True):
         super().__init__()
         self.Xtr = Xtr
@@ -56,6 +57,7 @@ class FalkonHO(AbsHypergradModel):
         self.Yts = Yts
 
         self.M = M
+        self.tot_N = tot_N
         self.maxiter = maxiter
         self.opt = opt
 
@@ -81,7 +83,8 @@ class FalkonHO(AbsHypergradModel):
             center_selection=center_selection,
             maxiter=self.maxiter,
             seed=129,
-            options=self.opt)
+            options=self.opt,
+            N=self.tot_N)
         if self.warm_start:
             self.flk.fit(self.Xtr, self.Ytr, warm_start=beta.detach().clone())
         else:
@@ -355,13 +358,14 @@ def run_falkon_hypergrad(data,
 
 
 class FastTensorDataLoader:
-    def __init__(self, *tensors, batch_size, shuffle=False, drop_last=False):
+    def __init__(self, *tensors, batch_size, shuffle=False, drop_last=False, cuda=False):
         assert all(t.shape[0] == tensors[0].shape[0] for t in tensors)
         self.tensors = tensors
         self.num_points = self.tensors[0].shape[0]
         self.batch_size = batch_size
         self.shuffle = shuffle
         self.drop_last = drop_last
+        self.cuda = cuda
 
         n_batches, remainder = divmod(self.num_points, self.batch_size)
         if remainder > 0 and not drop_last:
@@ -384,13 +388,13 @@ class FastTensorDataLoader:
             batch = tuple(torch.index_select(t, 0, indices) for t in self.tensors)
         else:
             batch = tuple(t[self.i * self.batch_size : (self.i + 1) * self.batch_size] for t in self.tensors)
+        if self.cuda:
+            batch = tuple(t.cuda() for t in batch)
         self.i += 1
         return batch
 
     def __len__(self):
         return self.n_batches
-
-
 
 
 def stochastic_flk_hypergrad(
@@ -410,7 +414,9 @@ def stochastic_flk_hypergrad(
                          loss: ValidationLoss,
                          sigma_init: float = 2,
                          penalty_init: float = 1,
-                         warm_start: bool = True,):
+                         warm_start: bool = True,
+                         cuda: bool = False
+                         ):
     Xtr, Ytr, Xts, Yts = data['Xtr'], data['Ytr'], data['Xts'], data['Yts']
 
     if batch_size < falkon_M:
@@ -419,6 +425,8 @@ def stochastic_flk_hypergrad(
     n, d = Xtr.size()
     t = Ytr.size(1)
     dt, dev = Xtr.dtype, Xtr.device
+    if cuda and not Xtr.is_cuda:
+        dev = torch.device("cuda:0")
 
     # Choose start value for sigma
     if sigma_type == 'single':
@@ -431,7 +439,7 @@ def stochastic_flk_hypergrad(
     hparams = {
         'penalty': torch.tensor(penalty_init, requires_grad=True, dtype=dt, device=dev),  # e^{-penalty}
         'sigma': torch.tensor(start_sigma, requires_grad=True, dtype=dt, device=dev),
-        'centers': falkon_centers.select(Xtr, Y=None, M=falkon_M).requires_grad_(),
+        'centers': falkon_centers.select(Xtr, Y=None, M=falkon_M).to(dev).requires_grad_(),
     }
     params = {
         'alpha': torch.zeros(falkon_M, t, requires_grad=True, dtype=dt, device=dev),
@@ -443,14 +451,14 @@ def stochastic_flk_hypergrad(
             {'params': hparams['sigma']},
             {'params': hparams['centers']}
         ], lr=outer_lr)
-    hparam_history = [[h.detach().clone() for h in hparams.values()]]
+    hparam_history = [[h.detach().cpu().clone() for h in hparams.values()]]
     val_loss_history = []
     hgrad_history = []
     time_history = []
 
-    train_loader = FastTensorDataLoader(Xtr, Ytr, batch_size=batch_size, shuffle=True, drop_last=False)
+    train_loader = FastTensorDataLoader(Xtr, Ytr, batch_size=batch_size, shuffle=True, drop_last=False, cuda=cuda)
     train_loader = iter(train_loader)
-    test_loader = FastTensorDataLoader(Xts, Yts, batch_size=batch_size, shuffle=True, drop_last=False)
+    test_loader = FastTensorDataLoader(Xts, Yts, batch_size=batch_size, shuffle=True, drop_last=False, cuda=cuda)
     test_loader = iter(test_loader)
 
     for o_step in range(outer_steps):
@@ -459,7 +467,7 @@ def stochastic_flk_hypergrad(
         b_ts_x, b_ts_y = next(test_loader)
         flk_helper = FalkonHO(
             falkon_M, falkon_centers, falkon_maxiter, b_tr_x, b_tr_y, b_ts_x, b_ts_y, falkon_opt, loss,
-            warm_start=warm_start)
+            warm_start=warm_start, tot_N=None)
 
         i_data_load = time.time()
         params = flk_helper.inner_opt(params, hparams)
@@ -469,11 +477,10 @@ def stochastic_flk_hypergrad(
 
         # Start 'outer_opt'
         outer_opt.zero_grad()
-        #hgrad_out = direct_valgrad(params, hparams, flk_helper, set_grad=True)
-        hgrad_out = compute_hypergrad(params, hparams, model=flk_helper, cg_steps=hessian_cg_steps,
-                                      cg_tol=hessian_cg_tol, set_grad=True, timings=debug)
+        hgrad_out = direct_valgrad(params, hparams, flk_helper, set_grad=True)
+        #hgrad_out = compute_hypergrad(params, hparams, model=flk_helper, cg_steps=hessian_cg_steps,
+        #                              cg_tol=hessian_cg_tol, set_grad=True, timings=False)
 
-        #print(hparams['centers'].grad)
         #hparams['penalty'].grad = None
         #hparams['sigma'].grad = None
         #hparams['centers'].grad = None
@@ -482,11 +489,15 @@ def stochastic_flk_hypergrad(
         hparams['sigma'].data.clamp_(min=1e-10)
         i_end = time.time()
 
-        if debug:
-            print("[%4d/%4d] - time %.2fs (data-load %.2fs, inner-opt %.2fs, outer-opt %.2fs)" % (o_step, outer_steps, i_end - i_start, i_data_load - i_start, inner_opt_t - i_data_load, i_end - inner_opt_t))
+        if debug and o_step % 1 == 0:
+            #print("[%4d/%4d] - time %.2fs (data-load %.2fs, inner-opt %.2fs, outer-opt %.2fs)" % (o_step, outer_steps, i_end - i_start, i_data_load - i_start, inner_opt_t - i_data_load, i_end - inner_opt_t))
+            #print("centers", hparams['centers'].mean(), hparams['centers'].min(), hparams['centers'].max(), hparams['centers'].sum())
+            #print("centers\n", hparams['centers'])
+            #print("alpha\n", params['alpha'])
             #print("GRADIENT", hgrad_out[1])
-            print("NEW HPARAMS", hparams)
-            print("NEW VAL LOSS", hgrad_out[0])
+            #print("NEW HPARAMS", hparams)
+            print("%5.3f, %5.3f" % (hparams['penalty'].item(), hparams['sigma'][0].item()))
+            print(hgrad_out[0].item())
 
         hparam_history.append([h.detach().clone().cpu() for h in hparams.values()])
         val_loss_history.append(hgrad_out[0])

@@ -6,6 +6,7 @@ import torch
 
 from falkon import FalkonOptions
 from falkon.kernels import GaussianKernel
+from falkon.kernels.distance_kernel import DistKerContainer
 from falkon.kernels.tiling_red import TilingGenred
 from falkon.mmv_ops.keops import _decide_backend, _keops_dtype
 from falkon.utils.helpers import check_same_device
@@ -28,9 +29,9 @@ class DiffGaussianKernel(GaussianKernel):
             'x1 = Vi(%d)' % (X1.shape[1]),
             'x2 = Vj(%d)' % (X2.shape[1]),
             'v = Vj(%d)' % (v.shape[1]),
-            'g = Pm(%d)' % (self.gamma.shape[0]),
+            'g = Pm(%d)' % (self.sigma.shape[0]),
         ]
-        other_vars = [self.gamma.to(device=X1.device, dtype=X1.dtype)]
+        other_vars = [self.sigma.to(device=X1.device, dtype=X1.dtype)]
 
         # Choose backend
         N, D = X1.shape
@@ -58,18 +59,24 @@ class DiffGaussianKernel(GaussianKernel):
         return functools.partial(self.keops_dmmv_helper, mmv_fn=self._keops_mmv_impl)
 
     def _prepare(self, X1, X2):
-        gamma = self.gamma.to(device=X1.device, dtype=X1.dtype)
-        return super()._prepare(X1.div(gamma), X2.div(gamma))
+        if self.gaussian_type == "full":
+            raise NotImplementedError("DiffRbfKernel doesn't work with full covariance")
+
+        sigma = self.sigma.to(X1)
+        X1 = X1.div(sigma)
+        X2 = X2.div(sigma)
+        return DistKerContainer(
+            sq1=torch.norm(X1, p=2, dim=1, keepdim=True).square(),
+            sq2=torch.norm(X2, p=2, dim=1, keepdim=True).square()
+        )
 
     def _apply(self, X1, X2, out):
-        gamma = self.gamma.to(device=X1.device, dtype=X1.dtype)
-        if X1.shape[0] == gamma.shape[0]:
-            X1 = X1.div(gamma)
-            X2 = (X2.T.div(gamma)).T
-        else:
-            X1 = X1.div(gamma)
-            X2 = (X2.T.div(gamma)).T
-        return super()._apply(X1, X2, out)
+        if self.gaussian_type == "full":
+            raise NotImplementedError("DiffRbfKernel doesn't work with full covariance")
+
+        sigma = self.sigma.to(X1)
+        out.addmm_(X1.div(sigma.square()), X2)
+        print("Out has NaNs", torch.isnan(out).sum().item())
 
     def _transform(self, A) -> torch.Tensor:
         A.mul_(-0.5)
