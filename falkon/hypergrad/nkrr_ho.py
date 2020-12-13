@@ -1,14 +1,14 @@
-import time
 import itertools
+import time
 
 import numpy as np
 import torch
 import torch.nn as nn
 
 import falkon
-from falkon.kernels.diff_rbf_kernel import DiffGaussianKernel
-from falkon.center_selection import UniformSelector, FixedSelector, CenterSelector
+from falkon.center_selection import FixedSelector, CenterSelector
 from falkon.hypergrad.leverage_scores import subs_deff_simple
+from falkon.kernels.diff_rbf_kernel import DiffGaussianKernel
 
 
 class FastTensorDataLoader:
@@ -39,13 +39,15 @@ class FastTensorDataLoader:
             if self.i >= self.n_batches:  # This should handle drop_last correctly
                 raise StopIteration()
         except AttributeError:
-            raise RuntimeError("Make sure you make the tensor data-loader an iterator before iterating over it!")
+            raise RuntimeError(
+                "Make sure you make the tensor data-loader an iterator before iterating over it!")
 
         if self.indices is not None:
-            indices = self.indices[self.i * self.batch_size : (self.i + 1) * self.batch_size]
+            indices = self.indices[self.i * self.batch_size: (self.i + 1) * self.batch_size]
             batch = tuple(t[indices] for t in self.tensors)
         else:
-            batch = tuple(t[self.i * self.batch_size : (self.i + 1) * self.batch_size] for t in self.tensors)
+            batch = tuple(
+                t[self.i * self.batch_size: (self.i + 1) * self.batch_size] for t in self.tensors)
         if self.cuda:
             batch = tuple(t.cuda() for t in batch)
         self.i += 1
@@ -53,6 +55,32 @@ class FastTensorDataLoader:
 
     def __len__(self):
         return self.n_batches
+
+
+def test_predict(model,
+                 test_loader: FastTensorDataLoader,
+                 err_fn: callable,
+                 epoch: int,
+                 time_start: float,
+                 train_error: float,
+                 ):
+    t_elapsed = time.time() - time_start  # Stop the time
+    model.eval()
+    test_loader = iter(test_loader)
+    test_preds, test_labels = [], []
+    try:
+        while True:
+            b_ts_x, b_ts_y = next(test_loader)
+            test_preds.append(model.predict(b_ts_x))
+            test_labels.append(b_ts_y)
+    except StopIteration:
+        test_preds = torch.cat(test_preds)
+        test_labels = torch.cat(test_labels)
+        test_err, err_name = err_fn(test_labels.detach().cpu(), test_preds.detach().cpu())
+    print(f"Epoch {epoch} ({t_elapsed:5.2f}s) - "
+          f"Tr {err_name} = {train_error:6.5f} , "
+          f"Ts {err_name} = {test_err:6.5f} -- "
+          f"Sigma {model.sigma.item():.3f} - Penalty {np.exp(-model.penalty.item()):e}")
 
 
 class NKRR(nn.Module):
@@ -76,8 +104,9 @@ class NKRR(nn.Module):
         k = DiffGaussianKernel(self.sigma, self.opt)
 
         preds = self.predict(X)
-        loss = torch.mean((preds - Y)**2)
-        reg = torch.exp(-self.penalty) * (self.alpha.T @ (k.mmv(self.centers, self.centers, self.alpha)))
+        loss = torch.mean((preds - Y) ** 2)
+        reg = torch.exp(-self.penalty) * (
+                self.alpha.T @ (k.mmv(self.centers, self.centers, self.alpha)))
 
         return (loss + reg), preds
 
@@ -112,12 +141,12 @@ class FLK_NKRR(nn.Module):
         k = DiffGaussianKernel(self.sigma, self.opt)
 
         preds = self.predict(X)
-        loss = torch.mean((preds - Y)**2)
+        loss = torch.mean((preds - Y) ** 2)
         pen = torch.exp(-self.penalty)
         if self.regularizer == "deff":
-            #d_eff = subs_deff_simple(k, penalty=pen, X=X, J=self.centers)
+            # d_eff = subs_deff_simple(k, penalty=pen, X=X, J=self.centers)
             d_eff = subs_deff_simple(k, penalty=pen, X=self.centers, J=self.centers)
-            #d_eff = subs_deff_simple(k, penalty=pen, X=X, J=X[:self.centers.shape[0]])
+            # d_eff = subs_deff_simple(k, penalty=pen, X=X, J=X[:self.centers.shape[0]])
             reg = d_eff / X.shape[0]
         elif self.regularizer == "tikhonov":
             # This is the normal RKHS norm of the function
@@ -166,12 +195,12 @@ def nkrr_ho(Xtr, Ytr,
             loss_every: int,
             err_fn,
             opt,
-           ):
+            ):
     # Choose start value for sigma
     if sigma_type == 'single':
         start_sigma = [sigma_init]
     elif sigma_type == 'diag':
-        start_sigma = [sigma_init] * d
+        start_sigma = [sigma_init] * Xtr.shape[1]
     else:
         raise ValueError("sigma_type %s unrecognized" % (sigma_type))
 
@@ -191,8 +220,10 @@ def nkrr_ho(Xtr, Ytr,
         {"params": [model.sigma, model.penalty, model.centers], "lr": hp_lr},
     ])
 
-    train_loader = FastTensorDataLoader(Xtr, Ytr, batch_size=batch_size, shuffle=True, drop_last=False, cuda=cuda)
-    test_loader = FastTensorDataLoader(Xts, Yts, batch_size=batch_size, shuffle=False, drop_last=False, cuda=cuda)
+    train_loader = FastTensorDataLoader(Xtr, Ytr, batch_size=batch_size, shuffle=True,
+                                        drop_last=False, cuda=cuda)
+    test_loader = FastTensorDataLoader(Xts, Yts, batch_size=batch_size, shuffle=False,
+                                       drop_last=False, cuda=cuda)
 
     for epoch in range(num_epochs):
         train_loader = iter(train_loader)
@@ -218,19 +249,9 @@ def nkrr_ho(Xtr, Ytr,
                 if i % loss_every == (loss_every - 1):
                     print(f"step {i} - {err_name} {running_error / samples_processed}")
         except StopIteration:
-            t_elapsed = time.time() - e_start  # Stop the time
-
-            model.eval()
-            test_loader = iter(test_loader)
-            test_preds = []
-            try:
-                while True:
-                    b_ts_x, _ = next(test_loader)
-                    test_preds.append(model.predict(b_ts_x))
-            except StopIteration:
-                test_preds = torch.cat(test_preds)
-                test_err, err_name = err_fn(Yts.detach().cpu(), test_preds.detach().cpu())
-            print(f"Epoch {epoch} ({t_elapsed:5.2f}s) - Tr {err_name} = {running_error / samples_processed:6.5f} , Ts {err_name} = {test_err:6.5f} -- Sigma {model.sigma.item():.3f} - Penalty {np.exp(-model.penalty.item()):e}")
+            test_predict(model=model, test_loader=test_loader, err_fn=err_fn,
+                         epoch=epoch, time_start=e_start,
+                         train_error=running_error / samples_processed)
 
 
 def flk_nkrr_ho(Xtr, Ytr,
@@ -249,15 +270,25 @@ def flk_nkrr_ho(Xtr, Ytr,
                 err_fn,
                 opt,
                 regularizer: str,
-               ):
+                ):
+    """
+    Algorithm description:
+        Only use the training-data to minimize the objective with respect to params and hyperparams.
+        At each iteration, a mini-batch of training data is picked and both params and hps are
+        optimized simultaneously: the former using Falkon, the latter using Adam.
+        The optimization objective is the squared loss plus a regularizer which depends on the
+        'regularizer' parameter (it can be either 'tikhonov' which means the squared norm of the
+        predictor will be used for regularization, or 'deff' so the effective-dimension will be
+        used instead. Note that the effective dimension calculation is likely to be unstable.)
+    """
     print("Starting Falkon-NKRR-HO optimization.")
-    print(f"{num_epochs} epochs - {sigma_type} sigma ({sigma_init}) - penalty ({penalty_init}) - {falkon_M} centers. HP-LR={hp_lr} - batch {batch_size}")
-    print(f"{regularizer} regularizer")
+    print(f"{num_epochs} epochs - {sigma_type} sigma ({sigma_init}) - penalty ({penalty_init}) - "
+          f"{falkon_M} centers. HP-LR={hp_lr} - batch {batch_size} - {regularizer} regularizer")
     # Choose start value for sigma
     if sigma_type == 'single':
         start_sigma = [sigma_init]
     elif sigma_type == 'diag':
-        start_sigma = [sigma_init] * d
+        start_sigma = [sigma_init] * Xtr.shape[1]
     else:
         raise ValueError("sigma_type %s unrecognized" % (sigma_type))
 
@@ -275,8 +306,10 @@ def flk_nkrr_ho(Xtr, Ytr,
         {"params": [model.sigma, model.penalty, model.centers], "lr": hp_lr},
     ])
 
-    train_loader = FastTensorDataLoader(Xtr, Ytr, batch_size=batch_size, shuffle=True, drop_last=False, cuda=cuda)
-    test_loader = FastTensorDataLoader(Xts, Yts, batch_size=batch_size, shuffle=False, drop_last=False, cuda=cuda)
+    train_loader = FastTensorDataLoader(Xtr, Ytr, batch_size=batch_size, shuffle=True,
+                                        drop_last=False, cuda=cuda)
+    test_loader = FastTensorDataLoader(Xts, Yts, batch_size=batch_size, shuffle=False,
+                                       drop_last=False, cuda=cuda)
 
     for epoch in range(num_epochs):
         train_loader = iter(train_loader)
@@ -290,40 +323,26 @@ def flk_nkrr_ho(Xtr, Ytr,
                 b_tr_x, b_tr_y = next(train_loader)
                 samples_processed += b_tr_x.shape[0]
 
+                # Calculate gradient for the hyper-parameters (on training-batch)
                 opt_hp.zero_grad()
                 loss, preds = model(b_tr_x, b_tr_y)
                 loss.backward()
-                print("centers has NaN gradients", torch.isnan(model.centers.grad).sum().item())
-                print("sigma has NaN gradients", torch.isnan(model.sigma.grad).sum().item())
-
-                # Change w
+                # Optimize the parameters alpha using Falkon (on training-batch)
                 model.adapt_alpha(b_tr_x, b_tr_y)
                 # Change theta
                 opt_hp.step()
 
                 preds = model.predict(b_tr_x)  # Redo predictions to check adapted model
-
                 err, err_name = err_fn(b_tr_y.detach().cpu(), preds.detach().cpu())
                 running_error += err * preds.shape[0]
                 if i % loss_every == (loss_every - 1):
                     print(f"step {i} - {err_name} {running_error / samples_processed}")
                     running_error = 0
                     samples_processed = 0
-
         except StopIteration:
-            t_elapsed = time.time() - e_start  # Stop the time
-
-            model.eval()
-            test_loader = iter(test_loader)
-            test_preds = []
-            try:
-                while True:
-                    b_ts_x, _ = next(test_loader)
-                    test_preds.append(model.predict(b_ts_x))
-            except StopIteration:
-                test_preds = torch.cat(test_preds)
-                test_err, err_name = err_fn(Yts.detach().cpu(), test_preds.detach().cpu())
-            print(f"Epoch {epoch} ({t_elapsed:5.2f}s) - Tr {err_name} = {running_error / samples_processed:6.5f} , Ts {err_name} = {test_err:6.5f} -- Sigma {model.sigma.item():.3f} - Penalty {np.exp(-model.penalty.item()):e}")
+            test_predict(model=model, test_loader=test_loader, err_fn=err_fn,
+                         epoch=epoch, time_start=e_start,
+                         train_error=running_error / samples_processed)
 
 
 def flk_nkrr_ho_val(Xtr, Ytr,
@@ -341,14 +360,31 @@ def flk_nkrr_ho_val(Xtr, Ytr,
                     loss_every: int,
                     err_fn,
                     opt,
-                   ):
-    print("Starting Falkon-NKRR-HO optimization.")
-    print(f"{num_epochs} epochs - {sigma_type} sigma ({sigma_init}) - penalty ({penalty_init}) - {falkon_M} centers. HP-LR={hp_lr} - batch {batch_size}")
+                    regularizer: str,
+                    ):
+    """
+    Algorithm description:
+        Use a training-set (mini-batched) to minimize the objective wrt parameters (using Falkon)
+        and a validation-set (mini-batched) to minimize wrt the hyper-parameters (using Adam).
+
+        At each iteration, a mini-batch of training data and one of validation data are picked.
+        First the hyper-parameters are moved in the direction of the validation gradient, and then
+        the parameters are moved in the direction of the training gradient (using Falkon).
+
+        The hyper-parameter (validation-data) objective is the squared loss plus a regularizer which
+        depends on the 'regularizer' parameter.
+
+        Since each iteration involves one mini-batch of two differently sized sets, behaviour
+        around mini-batch selection is a bit strange: check the code!
+    """
+    print("Starting Falkon-NKRR-HO-VAL optimization.")
+    print(f"{num_epochs} epochs - {sigma_type} sigma ({sigma_init}) - penalty ({penalty_init}) - "
+          f"{falkon_M} centers. HP-LR={hp_lr} - batch {batch_size} - {regularizer} regularizer")
     # Choose start value for sigma
     if sigma_type == 'single':
         start_sigma = [sigma_init]
     elif sigma_type == 'diag':
-        start_sigma = [sigma_init] * d
+        start_sigma = [sigma_init] * Xtr.shape[1]
     else:
         raise ValueError("sigma_type %s unrecognized" % (sigma_type))
 
@@ -357,6 +393,7 @@ def flk_nkrr_ho_val(Xtr, Ytr,
         penalty_init,
         falkon_centers.select(Xtr, Y=None, M=falkon_M),
         opt,
+        regularizer,
     )
     if cuda:
         model = model.cuda()
@@ -365,10 +402,16 @@ def flk_nkrr_ho_val(Xtr, Ytr,
         {"params": [model.sigma, model.penalty, model.centers], "lr": hp_lr},
     ])
 
-    n_tr_samples = int(Xtr.shape[0] * 1.0)
-    train_loader = FastTensorDataLoader(Xtr[:n_tr_samples], Ytr[:n_tr_samples], batch_size=batch_size, shuffle=True, drop_last=False, cuda=cuda)
-    val_loader = FastTensorDataLoader(Xtr[n_tr_samples:], Ytr[n_tr_samples:], batch_size=batch_size, shuffle=True, drop_last=False, cuda=cuda)
-    test_loader = FastTensorDataLoader(Xts, Yts, batch_size=batch_size, shuffle=False, drop_last=False, cuda=cuda)
+    n_tr_samples = int(Xtr.shape[0] * 0.9)
+    print("Using %d training samples - %d validation samples." %
+          (n_tr_samples, Xtr.shape[0] - n_tr_samples))
+    train_loader = FastTensorDataLoader(Xtr[:n_tr_samples], Ytr[:n_tr_samples],
+                                        batch_size=batch_size, shuffle=True, drop_last=False,
+                                        cuda=cuda)
+    val_loader = FastTensorDataLoader(Xtr[n_tr_samples:], Ytr[n_tr_samples:], batch_size=batch_size,
+                                      shuffle=True, drop_last=False, cuda=cuda)
+    test_loader = FastTensorDataLoader(Xts, Yts, batch_size=batch_size, shuffle=False,
+                                       drop_last=False, cuda=cuda)
 
     for epoch in range(num_epochs):
         train_loader = iter(train_loader)
@@ -381,35 +424,27 @@ def flk_nkrr_ho_val(Xtr, Ytr,
         try:
             for i in itertools.count(0):
                 b_tr_x, b_tr_y = next(train_loader)
-                b_vl_x, b_vl_y = next(val_loader)
+                try:
+                    b_vl_x, b_vl_y = next(val_loader)
+                except StopIteration:  # We assume that the validation loader is smaller, so we always restart it.
+                    val_loader = iter(val_loader)
+                    b_vl_x, b_vl_y = next(val_loader)
                 samples_processed += b_vl_x.shape[0]
 
-                # Inner opt with train
                 # Outer (hp) opt with validation
                 opt_hp.zero_grad()
                 loss, preds = model(b_vl_x, b_vl_y)
                 loss.backward()
                 opt_hp.step()
+                # Inner opt with train
                 model.adapt_alpha(b_tr_x, b_tr_y)
-
-                preds = model.predict(b_vl_x)  # Redo predictions to check adapted model
-
+                # Redo predictions to check adapted model
+                preds = model.predict(b_vl_x)
                 err, err_name = err_fn(b_vl_y.detach().cpu(), preds.detach().cpu())
                 running_error += err * preds.shape[0]
                 if i % loss_every == (loss_every - 1):
                     print(f"step {i} - {err_name} {running_error / samples_processed}")
         except StopIteration:
-            t_elapsed = time.time() - e_start  # Stop the time
-
-            model.eval()
-            test_loader = iter(test_loader)
-            test_preds = []
-            try:
-                while True:
-                    b_ts_x, _ = next(test_loader)
-                    test_preds.append(model.predict(b_ts_x))
-            except StopIteration:
-                test_preds = torch.cat(test_preds)
-                test_err, err_name = err_fn(Yts.detach().cpu(), test_preds.detach().cpu())
-            print(f"Epoch {epoch} ({t_elapsed:5.2f}s) - Tr {err_name} = {running_error / samples_processed:6.5f} , Ts {err_name} = {test_err:6.5f} -- Sigma {model.sigma.item():.3f} - Penalty {np.exp(-model.penalty.item()):e}")
-
+            test_predict(model=model, test_loader=test_loader, err_fn=err_fn,
+                         epoch=epoch, time_start=e_start,
+                         train_error=running_error / samples_processed)
