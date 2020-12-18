@@ -70,6 +70,7 @@ class Dataset(Enum):
     MNIST = 'mnist'
     CIFAR10 = 'cifar10'
     HOHIGGS = 'ho-higgs'
+    ICTUS = 'ictus'
 
     def __str__(self):
         return self.value

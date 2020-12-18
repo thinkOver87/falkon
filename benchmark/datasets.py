@@ -401,6 +401,7 @@ class YelpDataset(BaseDataset):
     @staticmethod
     def to_tensorflow(Xtr, Ytr, Xts, Yts, **kwargs):
         import tensorflow as tf
+
         def scipy2tf(X):
             # Uses same representation as pytorch
             # https://www.tensorflow.org/api_docs/python/tf/sparse/SparseTensor
@@ -431,14 +432,14 @@ class FlightsDataset(BaseDataset):
         # As for https://github.com/jameshensman/VFF/blob/master/experiments/airline/airline_additive_figure.py
         # 1. Convert time of day from hhmm to minutes since midnight
         #  ArrTime is column 7, DepTime is column 6
-        X[:,7] = 60*np.floor(X[:,7]/100) + np.mod(X[:,7], 100)
-        X[:,6] = 60*np.floor(X[:,6]/100) + np.mod(X[:,6], 100)
+        X[:, 7] = 60*np.floor(X[:, 7]/100) + np.mod(X[:, 7], 100)
+        X[:, 6] = 60*np.floor(X[:, 6]/100) + np.mod(X[:, 6], 100)
         # 2. remove flights with silly negative delays (small negative delays are OK)
         pos_delay_idx = np.where(Y > -60)[0]
         X = X[pos_delay_idx, :]
         Y = Y[pos_delay_idx, :]
         # 3. remove outlying flights in term of length (col 'AirTime' at pos 5)
-        short_flight_idx = np.where(X[:,5] < 700)[0]
+        short_flight_idx = np.where(X[:, 5] < 700)[0]
         X = X[short_flight_idx, :]
         Y = Y[short_flight_idx, :]
 
@@ -485,8 +486,8 @@ class FlightsClsDataset(BaseDataset):
         # As for https://github.com/jameshensman/VFF/blob/master/experiments/airline/airline_additive_figure.py
         # 1. Convert time of day from hhmm to minutes since midnight
         #  ArrTime is column 7, DepTime is column 6
-        X[:,7] = 60*np.floor(X[:,7]/100) + np.mod(X[:,7], 100)
-        X[:,6] = 60*np.floor(X[:,6]/100) + np.mod(X[:,6], 100)
+        X[:, 7] = 60*np.floor(X[:, 7]/100) + np.mod(X[:, 7], 100)
+        X[:, 6] = 60*np.floor(X[:, 6]/100) + np.mod(X[:, 6], 100)
         # Turn regression into classification by thresholding delay or not delay:
         Y = (Y <= 0).astype(X.dtype)
 
@@ -734,7 +735,7 @@ class MnistDataset(BaseDataset):
         n_classes = 10
         damping = 1 / (n_classes)
         eye = np.eye(n_classes, dtype=as_np_dtype(Ytr.dtype))
-        A = eye - damping #+ eye * damping
+        A = eye - damping  # + eye * damping
 
         Ytr = A[Ytr.astype(np.int32), :]
         Yts = A[Yts.astype(np.int32), :]
@@ -802,6 +803,48 @@ class SmallHiggsDataset(BaseDataset):
         return self._dset_name
 
 
+class IctusDataset(BaseDataset):
+    file_name = '/data/DATASETS/ICTUS/run_all.mat'
+    _dset_name = 'ICTUS'
+    _default_train_frac = 0.8
+
+    @staticmethod
+    def read_data(dtype):
+        data_dict = scio.loadmat(IctusDataset.file_name)
+        X = np.asarray(data_dict['X'], dtype=as_np_dtype(dtype))
+        Y = np.asarray(data_dict['Y'], dtype=as_np_dtype(dtype))
+        return X, Y
+
+    @staticmethod
+    def split_data(X, Y, train_frac: Union[float, None]):
+        if train_frac is None:
+            train_frac = IctusDataset._default_train_frac
+        idx_tr, idx_ts = equal_split(X.shape[0], train_frac)
+        return X[idx_tr], Y[idx_tr], X[idx_ts], Y[idx_ts]
+
+    @staticmethod
+    def preprocess_x(Xtr: np.ndarray, Xts: np.ndarray) -> Tuple[np.ndarray, np.ndarray, dict]:
+        mtr = np.mean(Xtr, axis=0, dtype=np.float64, keepdims=True).astype(Xtr.dtype)
+        vtr = np.var(Xtr, axis=0, dtype=np.float64, ddof=1, keepdims=True).astype(Xtr.dtype)
+
+        Xtr -= mtr
+        Xtr /= vtr
+        Xts -= mtr
+        Xts /= vtr
+
+        return Xtr, Xts, {}
+
+    @staticmethod
+    def preprocess_y(Ytr: np.ndarray, Yts: np.ndarray) -> Tuple[np.ndarray, np.ndarray, dict]:
+        """Convert labels from 0, 1 to -1, +1"""
+        Ytr = Ytr * 2 - 1
+        Yts = Yts * 2 - 1
+        return Ytr.reshape((-1, 1)), Yts.reshape((-1, 1)), {}
+
+    def dset_name(self):
+        return self._dset_name
+
+
 """ Public API """
 
 __LOADERS = {
@@ -818,6 +861,7 @@ __LOADERS = {
     Dataset.MNIST_SMALL: MnistSmallDataset(),
     Dataset.CIFAR10: CIFAR10Dataset(),
     Dataset.HOHIGGS: SmallHiggsDataset(),
+    Dataset.ICTUS: IctusDataset(),
 }
 
 
