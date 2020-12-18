@@ -76,7 +76,6 @@ class DiffGaussianKernel(GaussianKernel):
 
         sigma = self.sigma.to(X1)
         out.addmm_(X1.div(sigma.square()), X2)
-        print("Out has NaNs", torch.isnan(out).sum().item())
 
     def _transform(self, A) -> torch.Tensor:
         A.mul_(-0.5)

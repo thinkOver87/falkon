@@ -167,14 +167,16 @@ def run_nkrr(dataset: Dataset,
              M: int,
              seed: int,
              regularizer: str,
+             opt_centers: bool,
              ):
     cuda = True
-    batch_size = 64000
-    loss_every = 10
+    batch_size = 2000
+    loss_every = 20
     mode = "flk"  # flk, flk_val
 
     print("Running Hyperparameter Tuning Experiment.")
-    print(f"CUDA: {cuda} -- Batch {batch_size} -- Loss report {loss_every} -- Mode {mode}.")
+    print(f"CUDA: {cuda} -- Batch {batch_size} -- Loss report {loss_every} -- Mode {mode} -- "
+          f"Optimize centers {opt_centers}.")
 
     import torch
     torch.manual_seed(seed)
@@ -187,8 +189,11 @@ def run_nkrr(dataset: Dataset,
     err_fns = get_err_fns(dataset)
 
     # Center selection
-    selector = UniformSelector(np.random.default_rng(seed))
-    centers = selector.select(Xtr, None, M)
+    if 'centers' in metadata:
+        centers = torch.from_numpy(metadata['centers'])
+    else:
+        selector = UniformSelector(np.random.default_rng(seed))
+        centers = selector.select(Xtr, None, M)
 
     # Initialize Falkon model
     falkon_opt = FalkonOptions(use_cpu=False, debug=False, cg_tolerance=1e-3)
@@ -209,9 +214,10 @@ def run_nkrr(dataset: Dataset,
             err_fn=err_fns[0],
             opt=falkon_opt,
             loss_every=loss_every,
+            opt_centers=opt_centers,
         )
     elif mode == "flk":
-        flk_nkrr_ho(
+        best_model = flk_nkrr_ho(
             Xtr, Ytr, Xts, Yts,
             num_epochs=num_epochs,
             sigma_type=sigma_type,
@@ -227,9 +233,10 @@ def run_nkrr(dataset: Dataset,
             opt=falkon_opt,
             loss_every=loss_every,
             regularizer=regularizer,
+            opt_centers=opt_centers,
         )
     elif mode == "flk_val":
-        flk_nkrr_ho_val(
+        best_model = flk_nkrr_ho_val(
             Xtr, Ytr, Xts, Yts,
             num_epochs=num_epochs,
             sigma_type=sigma_type,
@@ -244,8 +251,25 @@ def run_nkrr(dataset: Dataset,
             err_fn=err_fns[0],
             opt=falkon_opt,
             loss_every=loss_every,
+            regularizer=regularizer,
+            opt_centers=opt_centers,
         )
 
+    if cuda:
+        Xtr, Ytr, Xts, Yts = Xtr.cuda(), Ytr.cuda(), Xts.cuda(), Yts.cuda()
+    best_model.fit(Xtr, Ytr)
+    train_pred = best_model.predict(Xtr).cpu()
+    test_pred = best_model.predict(Xts).cpu()
+
+    print("Test (unseen) errors after retraining on the full train dataset")
+    if sigma_type == "diag":
+        print("Penalty: %.5e - Sigma: %s" % (best_model.penalty, best_model.kernel.sigma))
+    else:
+        print("Penalty: %.5e - Sigma: %.5f" % (best_model.penalty, best_model.kernel.sigma))
+    for efn in err_fns:
+        train_err, err = efn(Ytr.cpu(), train_pred, **metadata)
+        test_err, err = efn(Yts.cpu(), test_pred, **metadata)
+        print(f"Train {err}: {train_err:.5f} -- Test {err}: {test_err:.5f}")
 
 
 def run_exp(dataset: Dataset,
@@ -261,13 +285,13 @@ def run_exp(dataset: Dataset,
             loss: str,
             M: int,
             seed: int):
-    cuda = False
-    train_frac = 0.8
-    sgd = True
+    cuda = True
+    train_frac = 0.7
+    sgd = False
     batch_size = 32_000
     cg_tol = 1e-4
     warm_start = True
-    error_every = 100
+    error_every = 10
 
     import torch
     torch.manual_seed(seed)
@@ -282,17 +306,30 @@ def run_exp(dataset: Dataset,
     err_fns = get_err_fns(dataset)
 
     # We use a validation split (redefinition of Xtr, Ytr).
-    idx_tr, idx_val = equal_split(Xtr.shape[0], train_frac=train_frac)
-    #Xval, Yval = Xtr[idx_val], Ytr[idx_val]
-    #Xtr, Ytr = Xtr[idx_tr], Ytr[idx_tr]
-    #print("Splitting data for validation and testing: Have %d train - %d validation samples" %
-    #      (Xtr.shape[0], Xval.shape[0]))
-    #data = {'Xtr': Xtr, 'Ytr': Ytr, 'Xts': Xval, 'Yts': Yval}
-    data = {'Xtr': Xtr, 'Ytr': Ytr, 'Xts': Xtr, 'Yts': Ytr}
+    if train_frac < 1.0:
+        #idx_tr, idx_val = equal_split(Xtr.shape[0], train_frac=train_frac)
+        n_train = int(Xtr.shape[0] * train_frac)
+        idx_tr = torch.arange(n_train)
+        idx_val = torch.arange(n_train, Xtr.shape[0])
+        Xval, Yval = Xtr[idx_val], Ytr[idx_val]
+        Xtr, Ytr = Xtr[idx_tr], Ytr[idx_tr]
+        data = {'Xtr': Xtr, 'Ytr': Ytr, 'Xts': Xval, 'Yts': Yval}
+    else:
+        data = {'Xtr': Xtr, 'Ytr': Ytr, 'Xts': Xtr, 'Yts': Ytr}
+
+    fmt_str = f"Dataset:{dataset}, cuda:{cuda}, sgd:{sgd}, warm_start:{warm_start}, cg_tol:{cg_tol}, opt-centers:{opt_centers}, loss:{loss}\n"
+    fmt_str += f"hp-lr:{outer_lr}, {sigma_type} sigma, training-fraction:{train_frac}"
+    if sgd: fmt_str += f", batch size:{batch_size}"
+    if 'centers' in metadata: fmt_str += f", stored centers"
+    else: fmt_str += ", fixed centers"
+
+    print("Starting FalkonHO training.")
+    print(fmt_str)
 
     # Center selection
     if 'centers' in metadata:
         centers = torch.from_numpy(metadata['centers'])
+        print("Loading centers")
     else:
         selector = UniformSelector(np.random.default_rng(seed))
         centers = selector.select(Xtr, None, M)
@@ -315,7 +352,7 @@ def run_exp(dataset: Dataset,
         train_err, err = err_fns[0](data['Ytr'].cpu(), train_pred.cpu(), **metadata)
         #val_err, err = err_fns[0](data['Yts'].cpu(), val_pred.cpu(), **metadata)
         val_err, err = err_fns[0](Yts.cpu(), val_pred.cpu(), **metadata)
-        print(f"Iteration {i} ({time.time() - t_s:.2f}s) - Train {err}: {train_err:.5f} -- Val {err}: {val_err:.5f}")
+        print(f"Iteration {i} ({time.time() - t_s:.2f}s) - Train {err}: {train_err:.5f} -- Test {err}: {val_err:.5f}")
 
     if sgd:
         hps, val_loss, hgrads, best_model, times = stochastic_flk_hypergrad(
@@ -362,8 +399,11 @@ def run_exp(dataset: Dataset,
     # Now we have the model, retrain with the full training data and test!
     print("Retraining on the full train dataset.")
     del data  # free GPU mem
-    Xtr = torch.cat([Xtr, Xval], 0)
-    Ytr = torch.cat([Ytr, Yval], 0)
+    try:
+        Xtr = torch.cat([Xtr, Xval], 0)
+        Ytr = torch.cat([Ytr, Yval], 0)
+    except NameError:
+        Xtr, Ytr = Xtr, Ytr
     if cuda:
         Xtr, Ytr, Xts, Yts = Xtr.cuda(), Ytr.cuda(), Xts.cuda(), Yts.cuda()
     best_model.maxiter = 20
@@ -374,6 +414,10 @@ def run_exp(dataset: Dataset,
     test_pred = best_model.predict(Xts).cpu()
 
     print("Test (unseen) errors after retraining on the full train dataset")
+    if sigma_type == "diag":
+        print("Penalty: %.5e - Sigma: %s" % (best_model.penalty, best_model.kernel.sigma))
+    else:
+        print("Penalty: %.5e - Sigma: %.5f" % (best_model.penalty, best_model.kernel.sigma))
     for efn in err_fns:
         train_err, err = efn(Ytr.cpu(), train_pred, **metadata)
         test_err, err = efn(Yts.cpu(), test_pred, **metadata)
@@ -468,6 +512,7 @@ if __name__ == "__main__":
                  M=args.M,
                  seed=args.seed,
                  regularizer=args.regularizer,
+                 opt_centers=args.optimize_centers,
                  )
     else:
         run_exp(dataset=args.dataset,

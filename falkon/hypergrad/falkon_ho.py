@@ -322,14 +322,15 @@ def run_falkon_hypergrad(data,
         hparams['centers'] = falkon_centers.select(Xtr, Y=None, M=falkon_M).requires_grad_()
 
     outer_opt = torch.optim.Adam(lr=outer_lr, params=hparams.values())
-    flk_helper = FalkonHO(falkon_M, falkon_centers, falkon_maxiter, Xtr, Ytr, Xts, Yts, falkon_opt, loss, warm_start=warm_start)
+    flk_helper = FalkonHO(falkon_M, falkon_centers, falkon_maxiter, Xtr, Ytr, Xts, Yts, falkon_opt, loss,
+                          tot_N=None, warm_start=warm_start)
 
     hparam_history = [[h.detach().clone() for h in hparams.values()]]
     val_loss_history = []
     hgrad_history = []
     time_history = []
     for o_step in range(outer_steps):
-        # Run inner loop to get alpha_*
+        # Run inner loop to get alpha*
         i_start = time.time()
         params = flk_helper.inner_opt(params, hparams)
         if callback is not None:
@@ -344,11 +345,12 @@ def run_falkon_hypergrad(data,
         hparams['penalty'].data.clamp_(min=1e-10)
         hparams['sigma'].data.clamp_(min=1e-10)
         i_end = time.time()
-        if debug:
-            print("[%4d/%4d] - time %.2fs (inner-opt %.2fs, outer-opt %.2fs)" % (o_step, outer_steps, i_end - i_start, inner_opt_t - i_start, i_end - inner_opt_t))
+        if True:
+            #print("[%4d/%4d] - time %.2fs (inner-opt %.2fs, outer-opt %.2fs)" % (o_step, outer_steps, i_end - i_start, inner_opt_t - i_start, i_end - inner_opt_t))
             #print("GRADIENT", hgrad_out[1])
-            print("NEW HPARAMS", hparams)
-            print("NEW VAL LOSS", hgrad_out[0])
+            print(f"Epoch {o_step} - sigma: {hparams['sigma'].detach().cpu()[0].item():.2f} - "
+                  f"penalty: {torch.exp(-hparams['penalty'].detach().cpu()).item():.3e} - "
+                  f"Validation loss: {hgrad_out[0].item():.4f}")
         hparam_history.append([h.detach().clone() for h in hparams.values()])
         val_loss_history.append(hgrad_out[0])
         hgrad_history.append([g.detach() for g in hgrad_out[1]])

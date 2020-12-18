@@ -62,9 +62,11 @@ def test_predict(model,
                  err_fn: callable,
                  epoch: int,
                  time_start: float,
+                 cum_time: float,
                  train_error: float,
                  ):
     t_elapsed = time.time() - time_start  # Stop the time
+    cum_time += t_elapsed
     model.eval()
     test_loader = iter(test_loader)
     test_preds, test_labels = [], []
@@ -77,10 +79,11 @@ def test_predict(model,
         test_preds = torch.cat(test_preds)
         test_labels = torch.cat(test_labels)
         test_err, err_name = err_fn(test_labels.detach().cpu(), test_preds.detach().cpu())
-    print(f"Epoch {epoch} ({t_elapsed:5.2f}s) - "
-          f"Tr {err_name} = {train_error:6.5f} , "
-          f"Ts {err_name} = {test_err:6.5f} -- "
-          f"Sigma {model.sigma.item():.3f} - Penalty {np.exp(-model.penalty.item()):e}")
+    print(f"Epoch {epoch} ({cum_time:5.2f}s) - "
+          f"Tr {err_name} = {train_error:6.4f} , "
+          f"Ts {err_name} = {test_err:6.4f} -- "
+          f"Sigma {model.sigma[0].item():.3f} - Penalty {np.exp(-model.penalty.item()):.2e}")
+    return cum_time
 
 
 class NKRR(nn.Module):
@@ -116,14 +119,18 @@ class NKRR(nn.Module):
 
 
 class FLK_NKRR(nn.Module):
-    def __init__(self, sigma_init, penalty_init, centers_init, opt, regularizer):
+    def __init__(self, sigma_init, penalty_init, centers_init, opt, regularizer, opt_centers, tot_n=None):
         super().__init__()
         penalty = nn.Parameter(torch.tensor(penalty_init, requires_grad=True))
         self.register_parameter('penalty', penalty)
         sigma = nn.Parameter(torch.tensor(sigma_init, requires_grad=True))
         self.register_parameter('sigma', sigma)
-        centers = nn.Parameter(centers_init.requires_grad_())
-        self.register_parameter('centers', centers)
+
+        centers = nn.Parameter(centers_init.requires_grad_(opt_centers))
+        if opt_centers:
+            self.register_parameter('centers', centers)
+        else:
+            self.register_buffer('centers', centers)
 
         self.f_alpha = torch.zeros(centers_init.shape[0], 1, requires_grad=False)
         self.register_buffer('alpha', self.f_alpha)
@@ -133,6 +140,7 @@ class FLK_NKRR(nn.Module):
         self.opt = opt
         self.flk_maxiter = 10
         self.regularizer = regularizer
+        self.tot_n = tot_n
 
     def forward(self, X, Y):
         """
@@ -156,7 +164,7 @@ class FLK_NKRR(nn.Module):
 
         return (loss + reg), preds
 
-    def adapt_alpha(self, X, Y):
+    def adapt_alpha(self, X, Y, n_tot=None):
         k = DiffGaussianKernel(self.sigma.detach(), self.opt)
         if X.is_cuda:
             fcls = falkon.InCoreFalkon
@@ -168,7 +176,8 @@ class FLK_NKRR(nn.Module):
                      M=self.centers.shape[0],
                      center_selection=FixedSelector(self.centers.detach()),
                      maxiter=self.flk_maxiter,
-                     options=self.opt)
+                     options=self.opt,
+                     N=self.tot_n)
         model.fit(X, Y, warm_start=self.alpha_pc)
 
         self.alpha = model.alpha_.detach()
@@ -178,6 +187,18 @@ class FLK_NKRR(nn.Module):
         k = DiffGaussianKernel(self.sigma, self.opt)
         preds = k.mmv(X, self.centers, self.alpha)
         return preds
+
+    def get_model(self):
+        k = DiffGaussianKernel(self.sigma.detach(), self.opt)
+        # TODO: make this return the correct class
+        model = falkon.InCoreFalkon(k,
+                     torch.exp(-self.penalty).item(),
+                     M=self.centers.shape[0],
+                     center_selection=FixedSelector(self.centers.detach()),
+                     maxiter=self.flk_maxiter,
+                     options=self.opt,
+                     )
+        return model
 
 
 def nkrr_ho(Xtr, Ytr,
@@ -270,6 +291,7 @@ def flk_nkrr_ho(Xtr, Ytr,
                 err_fn,
                 opt,
                 regularizer: str,
+                opt_centers: bool,
                 ):
     """
     Algorithm description:
@@ -298,12 +320,13 @@ def flk_nkrr_ho(Xtr, Ytr,
         falkon_centers.select(Xtr, Y=None, M=falkon_M),
         opt,
         regularizer,
+        opt_centers,
     )
     if cuda:
         model = model.cuda()
 
     opt_hp = torch.optim.Adam([
-        {"params": [model.sigma, model.penalty, model.centers], "lr": hp_lr},
+        {"params": model.parameters(), "lr": hp_lr},
     ])
 
     train_loader = FastTensorDataLoader(Xtr, Ytr, batch_size=batch_size, shuffle=True,
@@ -311,6 +334,7 @@ def flk_nkrr_ho(Xtr, Ytr,
     test_loader = FastTensorDataLoader(Xts, Yts, batch_size=batch_size, shuffle=False,
                                        drop_last=False, cuda=cuda)
 
+    cum_time = 0
     for epoch in range(num_epochs):
         train_loader = iter(train_loader)
         model.train()
@@ -319,6 +343,7 @@ def flk_nkrr_ho(Xtr, Ytr,
         running_error = 0
         samples_processed = 0
         try:
+            model.adapt_alpha(Xtr.cuda(), Ytr.cuda())
             for i in itertools.count(0):
                 b_tr_x, b_tr_y = next(train_loader)
                 samples_processed += b_tr_x.shape[0]
@@ -327,10 +352,10 @@ def flk_nkrr_ho(Xtr, Ytr,
                 opt_hp.zero_grad()
                 loss, preds = model(b_tr_x, b_tr_y)
                 loss.backward()
-                # Optimize the parameters alpha using Falkon (on training-batch)
-                model.adapt_alpha(b_tr_x, b_tr_y)
                 # Change theta
                 opt_hp.step()
+                # Optimize the parameters alpha using Falkon (on training-batch)
+                #model.adapt_alpha(b_tr_x, b_tr_y)
 
                 preds = model.predict(b_tr_x)  # Redo predictions to check adapted model
                 err, err_name = err_fn(b_tr_y.detach().cpu(), preds.detach().cpu())
@@ -340,9 +365,10 @@ def flk_nkrr_ho(Xtr, Ytr,
                     running_error = 0
                     samples_processed = 0
         except StopIteration:
-            test_predict(model=model, test_loader=test_loader, err_fn=err_fn,
-                         epoch=epoch, time_start=e_start,
-                         train_error=running_error / samples_processed)
+            cum_time = test_predict(model=model, test_loader=test_loader, err_fn=err_fn,
+                                    epoch=epoch, time_start=e_start, cum_time=cum_time,
+                                    train_error=running_error / samples_processed)
+    return model.get_model()
 
 
 def flk_nkrr_ho_val(Xtr, Ytr,
@@ -361,6 +387,7 @@ def flk_nkrr_ho_val(Xtr, Ytr,
                     err_fn,
                     opt,
                     regularizer: str,
+                    opt_centers: bool,
                     ):
     """
     Algorithm description:
@@ -388,21 +415,22 @@ def flk_nkrr_ho_val(Xtr, Ytr,
     else:
         raise ValueError("sigma_type %s unrecognized" % (sigma_type))
 
+    n_tr_samples = int(Xtr.shape[0] * 0.8)
     model = FLK_NKRR(
         start_sigma,
         penalty_init,
         falkon_centers.select(Xtr, Y=None, M=falkon_M),
         opt,
         regularizer,
+        opt_centers,
     )
     if cuda:
         model = model.cuda()
 
     opt_hp = torch.optim.Adam([
-        {"params": [model.sigma, model.penalty, model.centers], "lr": hp_lr},
+        {"params": model.parameters(), "lr": hp_lr},
     ])
 
-    n_tr_samples = int(Xtr.shape[0] * 0.9)
     print("Using %d training samples - %d validation samples." %
           (n_tr_samples, Xtr.shape[0] - n_tr_samples))
     train_loader = FastTensorDataLoader(Xtr[:n_tr_samples], Ytr[:n_tr_samples],
@@ -412,6 +440,7 @@ def flk_nkrr_ho_val(Xtr, Ytr,
                                       shuffle=True, drop_last=False, cuda=cuda)
     test_loader = FastTensorDataLoader(Xts, Yts, batch_size=batch_size, shuffle=False,
                                        drop_last=False, cuda=cuda)
+    cum_time = 0
 
     for epoch in range(num_epochs):
         train_loader = iter(train_loader)
@@ -422,6 +451,7 @@ def flk_nkrr_ho_val(Xtr, Ytr,
         running_error = 0
         samples_processed = 0
         try:
+            #model.adapt_alpha(Xtr[:n_tr_samples].cuda(), Ytr[:n_tr_samples].cuda())
             for i in itertools.count(0):
                 b_tr_x, b_tr_y = next(train_loader)
                 try:
@@ -445,6 +475,7 @@ def flk_nkrr_ho_val(Xtr, Ytr,
                 if i % loss_every == (loss_every - 1):
                     print(f"step {i} - {err_name} {running_error / samples_processed}")
         except StopIteration:
-            test_predict(model=model, test_loader=test_loader, err_fn=err_fn,
-                         epoch=epoch, time_start=e_start,
-                         train_error=running_error / samples_processed)
+            cum_time = test_predict(model=model, test_loader=test_loader, err_fn=err_fn,
+                                    epoch=epoch, time_start=e_start, cum_time=cum_time,
+                                    train_error=running_error / samples_processed)
+

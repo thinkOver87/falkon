@@ -785,7 +785,11 @@ class SmallHiggsDataset(BaseDataset):
         Xts -= mtr
         Xts /= vtr
 
-        return Xtr, Xts, {'centers': SmallHiggsDataset.read_centers(Xtr.dtype)}
+        centers = SmallHiggsDataset.read_centers(Xtr.dtype)
+        centers -= mtr
+        centers /= vtr
+
+        return Xtr, Xts, {'centers': centers}
 
     @staticmethod
     def preprocess_y(Ytr: np.ndarray, Yts: np.ndarray) -> Tuple[np.ndarray, np.ndarray, dict]:
